@@ -1,7 +1,8 @@
-import { BarChart3, Boxes, CreditCard, LogOut, PackagePlus, Printer, Search, Settings, ShoppingCart } from "lucide-react";
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { Banknote, BarChart3, Boxes, CreditCard, LogOut, Minus, PackagePlus, Pause, Plus, Printer, Receipt, RotateCcw, Search, Settings, ShoppingCart, Trash2 } from "lucide-react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import type { AppSettings, CartLine, InventoryMovement, Product, ProductInput, SalesReport, User } from "../shared/contracts";
 import { calculateTotals, formatBdt } from "../shared/pos";
+import logoUrl from "./assets/truepos-logo-cropped.png";
 
 type Screen = "billing" | "products" | "inventory" | "reports" | "settings";
 
@@ -27,11 +28,8 @@ export function App() {
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand">
-          <div className="brand-mark">TP</div>
-          <div>
-            <strong>TruePOS</strong>
-            <span>Offline retail terminal</span>
-          </div>
+          <img className="brand-logo" src={logoUrl} alt="TruePOS" />
+          <span>Offline retail terminal</span>
         </div>
         <nav>
           <NavButton active={screen === "billing"} icon={<ShoppingCart />} label="Billing" onClick={() => setScreen("billing")} />
@@ -55,7 +53,7 @@ export function App() {
         </div>
       </aside>
       <main className="workspace">
-        {screen === "billing" && <Billing notify={notify} />}
+        {screen === "billing" && <EnhancedBilling notify={notify} />}
         {screen === "products" && <Products user={user} notify={notify} />}
         {screen === "inventory" && <Inventory notify={notify} />}
         {screen === "reports" && <Reports />}
@@ -84,8 +82,7 @@ function Login({ onLogin }: { onLogin: (user: User) => void }) {
   return (
     <div className="login-page">
       <form className="login-panel" onSubmit={submit}>
-        <div className="brand-mark large">TP</div>
-        <h1>TruePOS</h1>
+        <img className="login-logo" src={logoUrl} alt="TruePOS" />
         <p>Local encrypted point of sale</p>
         <label>
           Username
@@ -227,6 +224,372 @@ function Billing({ notify }: { notify: (message: string) => void }) {
         </button>
         {receipt && <pre className="receipt-preview">{receipt}</pre>}
       </div>
+    </section>
+  );
+}
+
+type HeldCart = {
+  id: string;
+  label: string;
+  createdAt: string;
+  lines: CartLine[];
+};
+
+const heldCartStorageKey = "truepos.heldCarts";
+
+function EnhancedBilling({ notify }: { notify: (message: string) => void }) {
+  const [query, setQuery] = useState("");
+  const [products, setProducts] = useState<Product[]>([]);
+  const [cart, setCart] = useState<CartLine[]>([]);
+  const [paid, setPaid] = useState(0);
+  const [paymentMethod, setPaymentMethod] = useState<"cash" | "card" | "mobile">("cash");
+  const [heldCarts, setHeldCarts] = useState<HeldCart[]>([]);
+  const [lastSaleId, setLastSaleId] = useState("");
+  const [lastReceiptNo, setLastReceiptNo] = useState("");
+  const [invoicePreview, setInvoicePreview] = useState("");
+  const [busy, setBusy] = useState(false);
+  const scanInputRef = useRef<HTMLInputElement>(null);
+  const totals = useMemo(() => calculateTotals(cart), [cart]);
+  const trimmedQuery = query.trim();
+  const hasQuery = trimmedQuery.length > 0;
+  const exactProduct = hasQuery ? products.find((product) => product.barcode === trimmedQuery || product.sku === trimmedQuery) : undefined;
+  const priceCheckProduct = hasQuery ? exactProduct ?? products[0] : undefined;
+  const resultProducts = priceCheckProduct ? products.filter((product) => product.id !== priceCheckProduct.id) : products;
+  const itemCount = cart.reduce((sum, line) => sum + line.quantity, 0);
+  const tendered = paid || totals.grandTotal;
+  const changeDue = Math.max(0, tendered - totals.grandTotal);
+  const paymentReady = paymentMethod !== "cash" || tendered >= totals.grandTotal;
+
+  useEffect(() => {
+    if (!hasQuery) {
+      setProducts([]);
+      return;
+    }
+    api.products.search(trimmedQuery).then(setProducts).catch(console.error);
+  }, [hasQuery, trimmedQuery]);
+
+  useEffect(() => {
+    const stored = window.localStorage.getItem(heldCartStorageKey);
+    if (stored) setHeldCarts(JSON.parse(stored) as HeldCart[]);
+  }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem(heldCartStorageKey, JSON.stringify(heldCarts));
+  }, [heldCarts]);
+
+  const holdCart = () => {
+    if (cart.length === 0) {
+      notify("Cart is empty.");
+      return;
+    }
+    const held: HeldCart = {
+      id: crypto.randomUUID(),
+      label: `Hold ${heldCarts.length + 1} - ${new Date().toLocaleTimeString()}`,
+      createdAt: new Date().toISOString(),
+      lines: cart
+    };
+    setHeldCarts([held, ...heldCarts]);
+    setCart([]);
+    setPaid(0);
+    notify(`${held.label} saved.`);
+  };
+
+  const openInvoicePreview = async () => {
+    if (busy || cart.length === 0) return;
+    if (!paymentReady) {
+      notify("Paid amount is below the bill total.");
+      return;
+    }
+    setBusy(true);
+    try {
+      setInvoicePreview(await api.sales.previewReceipt(cart, { method: paymentMethod, amount: tendered }));
+    } catch (err) {
+      notify(err instanceof Error ? err.message : "Could not prepare invoice preview.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const printInvoice = async () => {
+    if (busy || cart.length === 0) return;
+    setBusy(true);
+    try {
+      const sale = await api.sales.createSale(cart, { method: paymentMethod, amount: tendered });
+      try {
+        await api.printing.printReceipt(sale.id);
+        setCart([]);
+        setPaid(0);
+        setInvoicePreview("");
+        setLastSaleId(sale.id);
+        setLastReceiptNo(sale.receiptNo);
+        notify(`Sale completed: ${sale.receiptNo}`);
+      } catch {
+        await api.sales.cancelSale(sale.id);
+        notify("Print cancelled. Sale was not completed.");
+      }
+    } catch (err) {
+      notify(err instanceof Error ? err.message : "Sale could not be completed.");
+    } finally {
+      setBusy(false);
+      scanInputRef.current?.focus();
+    }
+  };
+
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      if (event.key === "F2") {
+        event.preventDefault();
+        scanInputRef.current?.focus();
+      }
+      if (event.key === "F4") {
+        event.preventDefault();
+        holdCart();
+      }
+      if (event.key === "F8") {
+        event.preventDefault();
+        void openInvoicePreview();
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  });
+
+  const addProduct = (product: Product) => {
+    if (product.stock <= 0) {
+      notify(`${product.name} is out of stock.`);
+      return;
+    }
+    setCart((current) => {
+      const existing = current.find((line) => line.productId === product.id);
+      if (existing) {
+        if (existing.quantity + 1 > product.stock) {
+          notify(`Only ${product.stock} available for ${product.name}.`);
+          return current;
+        }
+        return current.map((line) => (line.productId === product.id ? { ...line, quantity: line.quantity + 1 } : line));
+      }
+      return [
+        ...current,
+        {
+          productId: product.id,
+          sku: product.sku,
+          barcode: product.barcode,
+          name: product.name,
+          quantity: 1,
+          unitPrice: product.price,
+          discount: 0,
+          vatRate: product.vatRate
+        }
+      ];
+    });
+    setQuery("");
+    scanInputRef.current?.focus();
+  };
+
+  const scanOrSearch = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!trimmedQuery) {
+      notify("Scan a barcode or type a product name first.");
+      scanInputRef.current?.focus();
+      return;
+    }
+    const searched = await api.products.search(trimmedQuery);
+    const match = searched.find((product) => product.barcode === trimmedQuery || product.sku === trimmedQuery) ?? searched[0];
+    if (match) addProduct(match);
+    else notify("No product found for this barcode or search.");
+  };
+
+  const updateLine = (productId: string, patch: Partial<CartLine>) => {
+    setCart((current) =>
+      current.map((line) =>
+        line.productId === productId
+          ? {
+              ...line,
+              ...patch,
+              quantity: Math.max(1, Number(patch.quantity ?? line.quantity)),
+              discount: Math.max(0, Math.min(Number(patch.discount ?? line.discount), line.unitPrice))
+            }
+          : line
+      )
+    );
+  };
+
+  const resumeCart = (held: HeldCart) => {
+    if (cart.length > 0) {
+      notify("Void or hold the current cart before resuming another sale.");
+      return;
+    }
+    setCart(held.lines);
+    setHeldCarts(heldCarts.filter((item) => item.id !== held.id));
+    scanInputRef.current?.focus();
+  };
+
+  const voidCart = () => {
+    setCart([]);
+    setPaid(0);
+    scanInputRef.current?.focus();
+  };
+
+  return (
+    <section className="screen billing-grid">
+      <div className="panel checkout-panel">
+        <div className="screen-heading">
+          <div>
+            <h2>Billing</h2>
+            <p>Scanner-ready checkout - F2 scan - F4 hold - F8 pay</p>
+          </div>
+          <CreditCard />
+        </div>
+        <form className="scan-bar" onSubmit={scanOrSearch}>
+          <Search size={18} />
+          <input ref={scanInputRef} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Scan barcode or search products" autoFocus />
+          <button type="submit">Add</button>
+        </form>
+        {hasQuery && priceCheckProduct && (
+          <button className="price-check" onClick={() => addProduct(priceCheckProduct)}>
+            <span>Best match</span>
+            <strong>{priceCheckProduct.name}</strong>
+            <div>
+              <b>{formatBdt(priceCheckProduct.price)}</b>
+              <small>SKU {priceCheckProduct.sku} - VAT {priceCheckProduct.vatRate}% - Stock {priceCheckProduct.stock}</small>
+            </div>
+          </button>
+        )}
+        {hasQuery && resultProducts.length > 0 && (
+          <div className="product-results">
+            <div className="section-title">
+              <strong>Other matches</strong>
+              <span>{resultProducts.length}</span>
+            </div>
+            {resultProducts.slice(0, 7).map((product) => (
+              <button key={product.id} onClick={() => addProduct(product)} className="result-row">
+                <span>
+                  <strong>{product.name}</strong>
+                  <small>{product.sku} - Stock {product.stock}</small>
+                </span>
+                <b>{formatBdt(product.price)}</b>
+              </button>
+            ))}
+          </div>
+        )}
+        <div className="held-sales">
+          <div className="section-title">
+            <strong>Held sales</strong>
+            <span>{heldCarts.length}</span>
+          </div>
+          {heldCarts.length === 0 && <small>No suspended sale</small>}
+          {heldCarts.map((held) => (
+            <button key={held.id} className="held-sale" onClick={() => resumeCart(held)}>
+              <span>{held.label}</span>
+              <b>{held.lines.reduce((sum, line) => sum + line.quantity, 0)} items</b>
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="panel cart-panel">
+        <div className="screen-heading">
+          <div>
+            <h2>Cart</h2>
+            <p>{itemCount} items in transaction</p>
+          </div>
+          <div className="cart-actions">
+            <button className="secondary compact" onClick={holdCart} disabled={cart.length === 0}>
+              <Pause size={15} /> Hold
+            </button>
+            <button className="danger compact" onClick={voidCart} disabled={cart.length === 0}>
+              <Trash2 size={15} /> Void
+            </button>
+          </div>
+        </div>
+        <div className="cart-lines">
+          {cart.length > 0 && (
+            <div className="cart-line cart-line-header">
+              <span>Product</span>
+              <span>Qty</span>
+              <span>Discount</span>
+              <span>Line total</span>
+              <span></span>
+            </div>
+          )}
+          {cart.map((line) => (
+            <div className="cart-line" key={line.productId}>
+              <div>
+                <strong>{line.name}</strong>
+                <small>{line.sku} - {formatBdt(line.unitPrice)} each</small>
+              </div>
+              <div className="qty-stepper">
+                <button onClick={() => updateLine(line.productId, { quantity: line.quantity - 1 })}><Minus size={14} /></button>
+                <input type="number" min="1" value={line.quantity} onChange={(event) => updateLine(line.productId, { quantity: Number(event.target.value) })} />
+                <button onClick={() => updateLine(line.productId, { quantity: line.quantity + 1 })}><Plus size={14} /></button>
+              </div>
+              <input type="number" min="0" value={line.discount} onChange={(event) => updateLine(line.productId, { discount: Number(event.target.value) })} />
+              <b>{formatBdt((line.unitPrice - line.discount) * line.quantity)}</b>
+              <button className="ghost icon-only" title="Void item" onClick={() => setCart(cart.filter((item) => item.productId !== line.productId))}>
+                <Trash2 size={16} />
+              </button>
+            </div>
+          ))}
+        </div>
+        <Totals totals={totals} />
+        <div className="payment-box">
+          <label>
+            Payment method
+            <select value={paymentMethod} onChange={(event) => setPaymentMethod(event.target.value as "cash" | "card" | "mobile")}>
+              <option value="cash">Cash</option>
+              <option value="card">Card</option>
+              <option value="mobile">Mobile banking</option>
+            </select>
+          </label>
+          <label>
+            Paid amount
+            <input type="number" min="0" value={paid} onChange={(event) => setPaid(Number(event.target.value))} />
+          </label>
+          <div className="quick-tender">
+            <button onClick={() => setPaid(totals.grandTotal)}><Banknote size={15} /> Exact</button>
+            <button onClick={() => setPaid((value) => value + 100)}>+100</button>
+            <button onClick={() => setPaid((value) => value + 500)}>+500</button>
+            <button onClick={() => setPaid((value) => value + 1000)}>+1000</button>
+            <button onClick={() => setPaid(0)}><RotateCcw size={15} /> Reset</button>
+          </div>
+          <div className="change-due">
+            <span>Change due</span>
+            <strong>{formatBdt(changeDue)}</strong>
+          </div>
+        </div>
+        <button className="primary wide" disabled={busy || cart.length === 0 || !paymentReady} onClick={openInvoicePreview}>
+          <Receipt size={16} /> Complete
+        </button>
+        {lastSaleId && cart.length === 0 && (
+          <div className="last-sale">
+            <span>Last sale {lastReceiptNo} saved.</span>
+            <button className="secondary compact" onClick={() => api.printing.printReceipt(lastSaleId).catch(() => notify("Could not reprint receipt."))}>
+              <Printer size={15} /> Reprint
+            </button>
+          </div>
+        )}
+      </div>
+      {invoicePreview && (
+        <div className="modal-backdrop" role="dialog" aria-modal="true">
+          <div className="invoice-modal">
+            <div className="modal-heading">
+              <div>
+                <h2>Invoice Preview</h2>
+                <p>Review the bill before printing</p>
+              </div>
+              <button className="ghost icon-only" onClick={() => setInvoicePreview("")}>x</button>
+            </div>
+            <pre className="invoice-preview">{invoicePreview}</pre>
+            <div className="modal-actions">
+              <button className="secondary" onClick={() => setInvoicePreview("")} disabled={busy}>
+                Cancel
+              </button>
+              <button className="primary" onClick={printInvoice} disabled={busy}>
+                <Printer size={16} /> Print
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   );
 }

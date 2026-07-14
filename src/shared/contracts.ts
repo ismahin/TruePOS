@@ -152,6 +152,8 @@ export type InventoryApi = {
 export type SalesApi = {
   createSale(lines: CartLine[], payment: SalePayment): Promise<Sale>;
   returnSale(saleId: string): Promise<Sale>;
+  cancelSale(saleId: string): Promise<Sale>;
+  previewReceipt(lines: CartLine[], payment: SalePayment): Promise<string>;
   getReceipt(saleId: string): Promise<string>;
 };
 

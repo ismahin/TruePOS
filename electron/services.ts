@@ -505,6 +505,42 @@ export class TruePOSServices {
     return { ...sale, status: "returned" as const };
   }
 
+  async cancelSale(saleId: string) {
+    const user = this.requireUser();
+    const sale = this.getSale(saleId);
+    if (sale.status === "returned") throw new Error("Sale has already been cancelled.");
+    if (user.role !== "admin" && sale.cashierId !== user.id) {
+      throw new Error("You can only cancel your own sale.");
+    }
+    const tx = this.db.transaction(() => {
+      this.db.prepare("UPDATE sales SET status = 'returned' WHERE id = ?").run(saleId);
+      for (const line of sale.lines) {
+        this.db.prepare("UPDATE products SET stock = stock + ?, updated_at = ? WHERE id = ?").run(line.quantity, now(), line.productId);
+        this.addMovement(line.productId, "return", line.quantity, `Print cancelled ${sale.receiptNo}`);
+      }
+    });
+    tx();
+    return { ...sale, status: "returned" as const };
+  }
+
+  async previewReceipt(lines: CartLine[], payment: SalePayment) {
+    const user = this.requireUser();
+    if (lines.length === 0) throw new Error("Sale must contain at least one product.");
+    const totals = calculateTotals(lines);
+    const previewSale: Sale = {
+      id: "preview",
+      receiptNo: "Preview",
+      lines,
+      payment,
+      totals,
+      cashierId: user.id,
+      cashierName: user.username,
+      status: "completed",
+      createdAt: now()
+    };
+    return buildReceiptText(previewSale, await this.getSettings());
+  }
+
   async getReceipt(saleId: string) {
     return buildReceiptText(this.getSale(saleId), await this.getSettings());
   }
@@ -690,14 +726,29 @@ export class TruePOSServices {
 
   private async printHtml(parent: BrowserWindowType, html: string, deviceName: string) {
     const printWindow = new BrowserWindow({ show: false, parent, webPreferences: { sandbox: true } });
-    await printWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
-    await new Promise<void>((resolve, reject) => {
+    try {
+      await printWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+      await new Promise<void>((resolve, reject) => {
+        let settled = false;
+        const finish = (error?: Error) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeout);
+          if (!printWindow.isDestroyed()) printWindow.close();
+          if (error) reject(error);
+          else resolve();
+        };
+        const timeout = setTimeout(() => finish(new Error("Print dialog timed out.")), 120000);
+
+        printWindow.on("closed", () => finish(new Error("Print window closed.")));
       printWindow.webContents.print({ silent: Boolean(deviceName), deviceName }, (success, failureReason) => {
-        printWindow.close();
-        if (success) resolve();
-        else reject(new Error(failureReason || "Print failed."));
+          if (success) finish();
+          else finish(new Error(failureReason || "Print cancelled."));
       });
-    });
+      });
+    } finally {
+      if (!printWindow.isDestroyed()) printWindow.close();
+    }
   }
 
   private sampleSale(): Sale {

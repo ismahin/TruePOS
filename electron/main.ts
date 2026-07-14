@@ -5,6 +5,9 @@ import { TruePOSServices } from "./services.js";
 
 const services = new TruePOSServices();
 let mainWindow: BrowserWindowType | null = null;
+const appIconPath = app.isPackaged ? path.join(process.resourcesPath, "icon.png") : path.join(__dirname, "../../build/icon.png");
+
+app.setAppUserModelId("com.truepos.desktop");
 
 async function createWindow() {
   mainWindow = new BrowserWindow({
@@ -13,6 +16,7 @@ async function createWindow() {
     minWidth: 1180,
     minHeight: 720,
     title: "TruePOS",
+    icon: appIconPath,
     backgroundColor: "#ffffff",
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
@@ -45,6 +49,8 @@ function registerIpc() {
 
   ipcMain.handle("sales:createSale", (_event, lines, payment) => services.createSale(lines, payment));
   ipcMain.handle("sales:returnSale", (_event, saleId) => services.returnSale(saleId));
+  ipcMain.handle("sales:cancelSale", (_event, saleId) => services.cancelSale(saleId));
+  ipcMain.handle("sales:previewReceipt", (_event, lines, payment) => services.previewReceipt(lines, payment));
   ipcMain.handle("sales:getReceipt", (_event, saleId) => services.getReceipt(saleId));
 
   ipcMain.handle("reports:getDailySales", (_event, date) => services.getDailySales(date));
