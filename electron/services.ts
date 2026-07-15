@@ -100,6 +100,10 @@ function dataDir() {
   return dir;
 }
 
+function databasePath() {
+  return path.join(dataDir(), "truepos.db");
+}
+
 async function getDatabaseKey() {
   const existing = await keytar.getPassword(serviceName, dbPasswordAccount);
   if (existing) return existing;
@@ -116,6 +120,22 @@ function hashPassword(password: string, salt = crypto.randomBytes(16).toString("
 function verifyPassword(password: string, stored: string) {
   const [salt, expected] = stored.split(":");
   return hashPassword(password, salt).split(":")[1] === expected;
+}
+
+function validateLoginCredentials(admin: { username?: string; password?: string }, cashier?: { username?: string; password?: string }) {
+  const adminUsername = admin.username?.trim() ?? "";
+  const adminPassword = admin.password ?? "";
+  if (adminUsername.length < 3) throw new Error("Admin username must be at least 3 characters.");
+  if (adminPassword.length < 6) throw new Error("Admin password must be at least 6 characters.");
+  const cashierUsername = cashier?.username?.trim() ?? "";
+  const cashierPassword = cashier?.password ?? "";
+  if (cashierUsername || cashierPassword) {
+    if (cashierUsername.length < 3) throw new Error("Cashier username must be at least 3 characters.");
+    if (cashierPassword.length < 6) throw new Error("Cashier password must be at least 6 characters.");
+    if (cashierUsername.toLowerCase() === adminUsername.toLowerCase()) throw new Error("Cashier username must be different from admin username.");
+    return { admin: { username: adminUsername, password: adminPassword }, cashier: { username: cashierUsername, password: cashierPassword } };
+  }
+  return { admin: { username: adminUsername, password: adminPassword }, cashier: undefined };
 }
 
 function productFromRow(row: Row): Product {
@@ -152,7 +172,7 @@ export class TruePOSServices {
   private googleDriveBackupRunning = false;
 
   async init() {
-    const dbPath = path.join(dataDir(), "truepos.db");
+    const dbPath = databasePath();
     const key = await getDatabaseKey();
     try {
       this.openDatabase(dbPath, key);
@@ -271,17 +291,6 @@ export class TruePOSServices {
   }
 
   private seed() {
-    const userCount = this.db.prepare("SELECT COUNT(*) AS count FROM users").get<{ count: number }>()?.count ?? 0;
-    if (userCount === 0) {
-      const createdAt = now();
-      this.db
-        .prepare("INSERT INTO users (id, username, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?)")
-        .run(uuid(), "admin", hashPassword("admin123"), "admin", createdAt);
-      this.db
-        .prepare("INSERT INTO users (id, username, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?)")
-        .run(uuid(), "cashier", hashPassword("cashier123"), "cashier", createdAt);
-    }
-
     const settings = this.db.prepare("SELECT value FROM settings WHERE key = 'app'").get<{ value: string }>();
     if (!settings) {
       this.db.prepare("INSERT INTO settings (key, value) VALUES ('app', ?)").run(JSON.stringify(defaultSettings));
@@ -312,6 +321,27 @@ export class TruePOSServices {
 
   async getCurrentUser() {
     return this.currentUser;
+  }
+
+  async isSetupRequired() {
+    const count = this.db.prepare("SELECT COUNT(*) AS count FROM users").get<{ count: number }>()?.count ?? 0;
+    return count === 0;
+  }
+
+  async setupInitialAdmin(username: string, password: string, cashier?: { username?: string; password?: string }) {
+    if (!(await this.isSetupRequired())) throw new Error("Initial setup is already complete.");
+    const credentials = validateLoginCredentials({ username, password }, cashier);
+    const user = this.replaceLoginUsers(credentials.admin, credentials.cashier);
+    this.currentUser = user;
+    return user;
+  }
+
+  async resetLoginCredentials(admin: { username?: string; password?: string }, cashier?: { username?: string; password?: string }) {
+    if (await this.isSetupRequired()) throw new Error("Create the first admin account before resetting login information.");
+    const credentials = validateLoginCredentials(admin, cashier);
+    this.replaceLoginUsers(credentials.admin, credentials.cashier);
+    this.currentUser = null;
+    return { adminUsername: credentials.admin.username, cashierUsername: credentials.cashier?.username ?? "" };
   }
 
   async createProduct(input: ProductInput) {
@@ -778,6 +808,23 @@ export class TruePOSServices {
     }
   }
 
+  async factoryReset() {
+    this.requireAdmin();
+    if (this.googleDriveBackupTimer) {
+      clearInterval(this.googleDriveBackupTimer);
+      this.googleDriveBackupTimer = null;
+    }
+    this.currentUser = null;
+    await keytar.deletePassword(serviceName, googleDriveRefreshTokenAccount);
+    this.close();
+    const dbPath = databasePath();
+    for (const suffix of ["", "-wal", "-shm"]) {
+      fs.rmSync(`${dbPath}${suffix}`, { force: true });
+    }
+    await this.init();
+    this.startGoogleDriveAutoBackupScheduler();
+  }
+
   async exportCsv(kind: "products" | "inventory" | "sales") {
     let rows: Row[];
     if (kind === "products") rows = this.db.prepare("SELECT * FROM products ORDER BY name").all<Row>();
@@ -1057,6 +1104,20 @@ export class TruePOSServices {
 
   private saveSettings(settings: AppSettings) {
     this.db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('app', ?)").run(JSON.stringify(settings));
+  }
+
+  private replaceLoginUsers(admin: { username: string; password: string }, cashier?: { username: string; password: string }) {
+    const createdAt = now();
+    const adminUser: User = { id: uuid(), username: admin.username, role: "admin" };
+    const insertUser = this.db.prepare("INSERT INTO users (id, username, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?)");
+    this.db.transaction(() => {
+      this.db.prepare("DELETE FROM users").run();
+      insertUser.run(adminUser.id, adminUser.username, hashPassword(admin.password), adminUser.role, createdAt);
+      if (cashier) {
+        insertUser.run(uuid(), cashier.username, hashPassword(cashier.password), "cashier", createdAt);
+      }
+    })();
+    return adminUser;
   }
 
   private getGoogleDriveClientId(settings?: AppSettings) {

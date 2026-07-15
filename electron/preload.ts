@@ -7,7 +7,10 @@ const api: TruePOSApi = {
   auth: {
     login: (username, password) => invoke("auth:login", username, password),
     logout: () => invoke("auth:logout"),
-    getCurrentUser: () => invoke("auth:getCurrentUser")
+    getCurrentUser: () => invoke("auth:getCurrentUser"),
+    isSetupRequired: () => invoke("auth:isSetupRequired"),
+    setupInitialAdmin: (username, password, cashier) => invoke("auth:setupInitialAdmin", username, password, cashier),
+    resetLoginCredentials: (admin, cashier) => invoke("auth:resetLoginCredentials", admin, cashier)
   },
   products: {
     create: (input) => invoke("products:create", input),
@@ -51,7 +54,8 @@ const api: TruePOSApi = {
     exportCsv: (kind) => invoke("backup:exportCsv", kind),
     connectGoogleDrive: () => invoke("backup:connectGoogleDrive"),
     disconnectGoogleDrive: () => invoke("backup:disconnectGoogleDrive"),
-    backupGoogleDriveNow: () => invoke("backup:backupGoogleDriveNow")
+    backupGoogleDriveNow: () => invoke("backup:backupGoogleDriveNow"),
+    factoryReset: () => invoke("backup:factoryReset")
   }
 };
 

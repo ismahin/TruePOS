@@ -149,6 +149,9 @@ export type AuthApi = {
   login(username: string, password: string): Promise<User>;
   logout(): Promise<void>;
   getCurrentUser(): Promise<User | null>;
+  isSetupRequired(): Promise<boolean>;
+  setupInitialAdmin(username: string, password: string, cashier?: { username: string; password: string }): Promise<User>;
+  resetLoginCredentials(admin: { username: string; password: string }, cashier?: { username: string; password: string }): Promise<{ adminUsername: string; cashierUsername: string }>;
 };
 
 export type ProductApi = {
@@ -200,6 +203,7 @@ export type BackupApi = {
   connectGoogleDrive(): Promise<AppSettings>;
   disconnectGoogleDrive(): Promise<AppSettings>;
   backupGoogleDriveNow(): Promise<AppSettings>;
+  factoryReset(): Promise<void>;
 };
 
 export type TruePOSApi = {

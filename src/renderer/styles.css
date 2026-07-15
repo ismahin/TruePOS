@@ -1103,6 +1103,22 @@ th {
   font-size: 12px;
 }
 
+.factory-reset-box {
+  border: 1px solid #fecdd3;
+  background: #fff7f7;
+  border-radius: 8px;
+  padding: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.factory-reset-box p {
+  color: #667085;
+  font-size: 12px;
+}
+
 .receipt-preview-shell,
 .barcode-preview-shell {
   background: #eef2f7;
@@ -1205,6 +1221,32 @@ th {
   text-align: center;
 }
 
+.setup-panel {
+  width: min(460px, calc(100vw - 32px));
+  text-align: left;
+}
+
+.setup-panel .login-logo,
+.setup-panel h2,
+.setup-panel p {
+  justify-self: center;
+  text-align: center;
+}
+
+.setup-checkbox {
+  border-top: 1px solid #edf1f7;
+  padding-top: 12px;
+}
+
+.setup-cashier-fields {
+  border: 1px solid #dbe2ee;
+  background: #f8fafc;
+  border-radius: 8px;
+  padding: 12px;
+  display: grid;
+  gap: 10px;
+}
+
 .form-error,
 .notice {
   border-radius: 8px;
@@ -1273,7 +1315,12 @@ th {
   .product-row,
   .inventory-row,
   .bar-row,
-  .backup-actions {
+  .backup-actions,
+  .factory-reset-box {
     grid-template-columns: 1fr;
+  }
+
+  .factory-reset-box {
+    display: grid;
   }
 }

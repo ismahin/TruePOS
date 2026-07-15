@@ -10,11 +10,20 @@ const api = window.truePOS;
 
 export function App() {
   const [user, setUser] = useState<User | null>(null);
+  const [setupRequired, setSetupRequired] = useState<boolean | null>(null);
   const [screen, setScreen] = useState<Screen>("billing");
   const [toast, setToast] = useState("");
 
   useEffect(() => {
-    api.auth.getCurrentUser().then(setUser).catch(() => setUser(null));
+    Promise.all([api.auth.isSetupRequired(), api.auth.getCurrentUser()])
+      .then(([required, currentUser]) => {
+        setSetupRequired(required);
+        setUser(currentUser);
+      })
+      .catch(() => {
+        setSetupRequired(false);
+        setUser(null);
+      });
   }, []);
 
   const notify = (message: string) => {
@@ -22,6 +31,17 @@ export function App() {
     window.setTimeout(() => setToast(""), 3500);
   };
 
+  if (setupRequired === null) return null;
+  if (setupRequired) {
+    return (
+      <FirstRunSetup
+        onComplete={(createdUser) => {
+          setSetupRequired(false);
+          setUser(createdUser);
+        }}
+      />
+    );
+  }
   if (!user) return <Login onLogin={setUser} />;
 
   return (
@@ -57,7 +77,17 @@ export function App() {
         {screen === "products" && <Products user={user} notify={notify} />}
         {screen === "inventory" && <EnhancedInventory notify={notify} />}
         {screen === "reports" && <Reports />}
-        {screen === "settings" && <SettingsScreen user={user} notify={notify} />}
+        {screen === "settings" && (
+          <SettingsScreen
+            user={user}
+            notify={notify}
+            onFactoryReset={() => {
+              setUser(null);
+              setSetupRequired(true);
+              setScreen("billing");
+            }}
+          />
+        )}
       </main>
       {toast && <div className="toast">{toast}</div>}
     </div>
@@ -65,9 +95,11 @@ export function App() {
 }
 
 function Login({ onLogin }: { onLogin: (user: User) => void }) {
-  const [username, setUsername] = useState("admin");
-  const [password, setPassword] = useState("admin123");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
   const [error, setError] = useState("");
+  const [resetMode, setResetMode] = useState(false);
+  const [notice, setNotice] = useState("");
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -77,6 +109,20 @@ function Login({ onLogin }: { onLogin: (user: User) => void }) {
     } catch (err) {
       setError(err instanceof Error ? err.message : "Login failed.");
     }
+  }
+
+  if (resetMode) {
+    return (
+      <ResetLoginInfo
+        onCancel={() => setResetMode(false)}
+        onComplete={(nextUsername) => {
+          setUsername(nextUsername);
+          setPassword("");
+          setNotice("Login information updated. Use the new credentials to sign in.");
+          setResetMode(false);
+        }}
+      />
+    );
   }
 
   return (
@@ -92,11 +138,186 @@ function Login({ onLogin }: { onLogin: (user: User) => void }) {
           Password
           <input value={password} type="password" onChange={(event) => setPassword(event.target.value)} />
         </label>
+        {notice && <div className="notice neutral">{notice}</div>}
         {error && <div className="form-error">{error}</div>}
         <button className="primary" type="submit">
           Login
         </button>
-        <small>Default setup: admin/admin123 and cashier/cashier123</small>
+        <button className="secondary" type="button" onClick={() => setResetMode(true)}>
+          Reset login information
+        </button>
+      </form>
+    </div>
+  );
+}
+
+function ResetLoginInfo({ onCancel, onComplete }: { onCancel: () => void; onComplete: (adminUsername: string) => void }) {
+  const [adminUsername, setAdminUsername] = useState("admin");
+  const [adminPassword, setAdminPassword] = useState("");
+  const [confirmAdminPassword, setConfirmAdminPassword] = useState("");
+  const [resetCashier, setResetCashier] = useState(true);
+  const [cashierUsername, setCashierUsername] = useState("cashier");
+  const [cashierPassword, setCashierPassword] = useState("");
+  const [confirmCashierPassword, setConfirmCashierPassword] = useState("");
+  const [confirmed, setConfirmed] = useState(false);
+  const [error, setError] = useState("");
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    setError("");
+    if (adminPassword !== confirmAdminPassword) {
+      setError("Admin passwords do not match.");
+      return;
+    }
+    if (resetCashier && cashierPassword !== confirmCashierPassword) {
+      setError("Cashier passwords do not match.");
+      return;
+    }
+    if (!confirmed) {
+      setError("Confirm that only login information will be changed.");
+      return;
+    }
+    try {
+      const result = await api.auth.resetLoginCredentials(
+        { username: adminUsername, password: adminPassword },
+        resetCashier ? { username: cashierUsername, password: cashierPassword } : undefined
+      );
+      onComplete(result.adminUsername);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Login information could not be reset.");
+    }
+  }
+
+  return (
+    <div className="login-page">
+      <form className="login-panel setup-panel" onSubmit={submit}>
+        <img className="login-logo" src={logoUrl} alt="TruePOS" />
+        <h2>Reset Login Information</h2>
+        <p>This changes only admin and cashier login details. Products, sales, inventory, reports, settings, and backups remain unchanged.</p>
+        <label>
+          New admin username
+          <input value={adminUsername} onChange={(event) => setAdminUsername(event.target.value)} autoFocus />
+        </label>
+        <label>
+          New admin password
+          <input value={adminPassword} type="password" onChange={(event) => setAdminPassword(event.target.value)} />
+        </label>
+        <label>
+          Confirm admin password
+          <input value={confirmAdminPassword} type="password" onChange={(event) => setConfirmAdminPassword(event.target.value)} />
+        </label>
+        <label className="checkbox setup-checkbox">
+          <input type="checkbox" checked={resetCashier} onChange={(event) => setResetCashier(event.target.checked)} />
+          Reset cashier login too
+        </label>
+        {resetCashier && (
+          <div className="setup-cashier-fields">
+            <label>
+              New cashier username
+              <input value={cashierUsername} onChange={(event) => setCashierUsername(event.target.value)} />
+            </label>
+            <label>
+              New cashier password
+              <input value={cashierPassword} type="password" onChange={(event) => setCashierPassword(event.target.value)} />
+            </label>
+            <label>
+              Confirm cashier password
+              <input value={confirmCashierPassword} type="password" onChange={(event) => setConfirmCashierPassword(event.target.value)} />
+            </label>
+          </div>
+        )}
+        <label className="checkbox">
+          <input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} />
+          I understand this only changes login information
+        </label>
+        {error && <div className="form-error">{error}</div>}
+        <button className="primary" type="submit">
+          Save Login Information
+        </button>
+        <button className="secondary" type="button" onClick={onCancel}>
+          Back to Login
+        </button>
+      </form>
+    </div>
+  );
+}
+
+function FirstRunSetup({ onComplete }: { onComplete: (user: User) => void }) {
+  const [username, setUsername] = useState("admin");
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [createCashier, setCreateCashier] = useState(true);
+  const [cashierUsername, setCashierUsername] = useState("cashier");
+  const [cashierPassword, setCashierPassword] = useState("");
+  const [confirmCashierPassword, setConfirmCashierPassword] = useState("");
+  const [error, setError] = useState("");
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    setError("");
+    if (password !== confirmPassword) {
+      setError("Passwords do not match.");
+      return;
+    }
+    if (createCashier && cashierPassword !== confirmCashierPassword) {
+      setError("Cashier passwords do not match.");
+      return;
+    }
+    try {
+      onComplete(
+        await api.auth.setupInitialAdmin(
+          username,
+          password,
+          createCashier ? { username: cashierUsername, password: cashierPassword } : undefined
+        )
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Setup failed.");
+    }
+  }
+
+  return (
+    <div className="login-page">
+      <form className="login-panel setup-panel" onSubmit={submit}>
+        <img className="login-logo" src={logoUrl} alt="TruePOS" />
+        <h2>Create Users</h2>
+        <p>Set the admin login for this TruePOS installation.</p>
+        <label>
+          Admin username
+          <input value={username} onChange={(event) => setUsername(event.target.value)} autoFocus />
+        </label>
+        <label>
+          Admin password
+          <input value={password} type="password" onChange={(event) => setPassword(event.target.value)} />
+        </label>
+        <label>
+          Confirm admin password
+          <input value={confirmPassword} type="password" onChange={(event) => setConfirmPassword(event.target.value)} />
+        </label>
+        <label className="checkbox setup-checkbox">
+          <input type="checkbox" checked={createCashier} onChange={(event) => setCreateCashier(event.target.checked)} />
+          Add cashier account
+        </label>
+        {createCashier && (
+          <div className="setup-cashier-fields">
+            <label>
+              Cashier username
+              <input value={cashierUsername} onChange={(event) => setCashierUsername(event.target.value)} />
+            </label>
+            <label>
+              Cashier password
+              <input value={cashierPassword} type="password" onChange={(event) => setCashierPassword(event.target.value)} />
+            </label>
+            <label>
+              Confirm cashier password
+              <input value={confirmCashierPassword} type="password" onChange={(event) => setConfirmCashierPassword(event.target.value)} />
+            </label>
+          </div>
+        )}
+        {error && <div className="form-error">{error}</div>}
+        <button className="primary" type="submit">
+          Start TruePOS
+        </button>
       </form>
     </div>
   );
@@ -1491,7 +1712,7 @@ function formatPercent(value: number) {
   return `${value.toFixed(1)}%`;
 }
 
-function SettingsScreen({ user, notify }: { user: User; notify: (message: string) => void }) {
+function SettingsScreen({ user, notify, onFactoryReset }: { user: User; notify: (message: string) => void; onFactoryReset: () => void }) {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [printers, setPrinters] = useState<string[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
@@ -1611,6 +1832,19 @@ function SettingsScreen({ user, notify }: { user: User; notify: (message: string
       notify("Google Drive disconnected.");
     } catch (err) {
       notify(err instanceof Error ? err.message : "Could not disconnect Google Drive.");
+    }
+  };
+
+  const factoryReset = async () => {
+    const confirmed = window.confirm("Factory reset will permanently delete products, inventory, sales, settings, users, and backup connections from this PC. Continue?");
+    if (!confirmed) return;
+    const finalConfirmed = window.confirm("This cannot be undone unless you already exported a backup. Reset TruePOS now?");
+    if (!finalConfirmed) return;
+    try {
+      await api.backup.factoryReset();
+      onFactoryReset();
+    } catch (err) {
+      notify(err instanceof Error ? err.message : "Factory reset failed.");
     }
   };
 
@@ -1859,6 +2093,15 @@ function SettingsScreen({ user, notify }: { user: User; notify: (message: string
               </button>
               <button className="secondary" onClick={() => api.backup.exportCsv("sales").then((path) => notify(`CSV exported: ${path}`))}>
                 Export Sales CSV
+              </button>
+            </div>
+            <div className="factory-reset-box">
+              <div>
+                <h2>Factory Reset</h2>
+                <p>Reset this PC to a fresh TruePOS installation. A new admin account must be created after reset.</p>
+              </div>
+              <button className="danger" disabled={user.role !== "admin"} onClick={factoryReset}>
+                <Trash2 size={16} /> Factory Reset
               </button>
             </div>
           </div>

@@ -37,6 +37,9 @@ function registerIpc() {
   ipcMain.handle("auth:login", (_event, username: string, password: string) => services.login(username, password));
   ipcMain.handle("auth:logout", () => services.logout());
   ipcMain.handle("auth:getCurrentUser", () => services.getCurrentUser());
+  ipcMain.handle("auth:isSetupRequired", () => services.isSetupRequired());
+  ipcMain.handle("auth:setupInitialAdmin", (_event, username: string, password: string, cashier) => services.setupInitialAdmin(username, password, cashier));
+  ipcMain.handle("auth:resetLoginCredentials", (_event, admin, cashier) => services.resetLoginCredentials(admin, cashier));
 
   ipcMain.handle("products:create", (_event, input) => services.createProduct(input));
   ipcMain.handle("products:update", (_event, id, input) => services.updateProduct(id, input));
@@ -74,6 +77,7 @@ function registerIpc() {
   ipcMain.handle("backup:connectGoogleDrive", () => services.connectGoogleDrive());
   ipcMain.handle("backup:disconnectGoogleDrive", () => services.disconnectGoogleDrive());
   ipcMain.handle("backup:backupGoogleDriveNow", () => services.backupGoogleDriveNow());
+  ipcMain.handle("backup:factoryReset", () => services.factoryReset());
 }
 
 function assertWindow() {
