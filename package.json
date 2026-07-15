@@ -1,6 +1,6 @@
 {
   "name": "truepos",
-  "version": "0.1.9",
+  "version": "0.1.19",
   "description": "TruePOS offline desktop point of sale",
   "main": "dist-electron/electron/main.js",
   "author": "TruePOS",
@@ -10,7 +10,8 @@
     "dev": "concurrently -k \"vite --host 127.0.0.1\" \"tsc -p tsconfig.node.json --watch\" \"wait-on tcp:5173 dist-electron/electron/main.js && node scripts/launch-electron.cjs\"",
     "build": "tsc -p tsconfig.json && tsc -p tsconfig.node.json && vite build",
     "test": "vitest run",
-    "dist": "npm run build && electron-builder --win nsis",
+    "prepare:google-drive": "node scripts/prepare-google-drive-config.cjs",
+    "dist": "npm run prepare:google-drive && npm run build && electron-builder --win nsis",
     "postinstall": "electron-builder install-app-deps"
   },
   "dependencies": {
@@ -59,6 +60,10 @@
       {
         "from": "build/icon.png",
         "to": "icon.png"
+      },
+      {
+        "from": "build/google-drive-oauth.json",
+        "to": "google-drive-oauth.json"
       }
     ],
     "win": {

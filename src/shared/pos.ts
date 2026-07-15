@@ -77,6 +77,8 @@ export function buildReceiptText(sale: Sale, settings: AppSettings): string {
 }
 
 export function receiptStyle(settings: ReceiptSettings): string {
+  const scaledLogoWidth = Math.max(8, settings.logoWidthMm * (settings.logoScale / 100));
+  const scaledLogoHeight = Math.max(4, settings.logoHeightMm * (settings.logoScale / 100));
   return `
     body {
       width: ${settings.widthMm}mm;
@@ -87,6 +89,18 @@ export function receiptStyle(settings: ReceiptSettings): string {
       color: #111827;
     }
     pre { white-space: pre-wrap; margin: 0; }
-    img.logo { display:block; max-width: 44mm; max-height: 22mm; margin: 0 auto 8px; object-fit: contain; }
+    .logo-wrap {
+      display: flex;
+      justify-content: center;
+      margin: ${settings.logoOffsetY}px 0 ${8 + settings.logoOffsetY}px;
+      transform: translateX(${settings.logoOffsetX}px);
+    }
+    img.logo {
+      display: block;
+      width: ${scaledLogoWidth}mm;
+      height: ${scaledLogoHeight}mm;
+      max-width: calc(${settings.widthMm}mm - ${settings.padding * 2}px);
+      object-fit: contain;
+    }
   `;
 }

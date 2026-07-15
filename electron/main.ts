@@ -40,10 +40,12 @@ function registerIpc() {
 
   ipcMain.handle("products:create", (_event, input) => services.createProduct(input));
   ipcMain.handle("products:update", (_event, id, input) => services.updateProduct(id, input));
+  ipcMain.handle("products:delete", (_event, id) => services.deleteProduct(id));
   ipcMain.handle("products:search", (_event, query) => services.searchProducts(query));
+  ipcMain.handle("products:list", (_event, params) => services.listProducts(params));
   ipcMain.handle("products:importCsv", (_event, csv) => services.importProductsCsv(csv));
 
-  ipcMain.handle("inventory:adjust", (_event, productId, quantity, note) => services.adjustInventory(productId, quantity, note));
+  ipcMain.handle("inventory:adjust", (_event, productId, quantity, note, type) => services.adjustInventory(productId, quantity, note, type));
   ipcMain.handle("inventory:listMovements", (_event, productId) => services.listMovements(productId));
   ipcMain.handle("inventory:getStock", (_event, productId) => services.getStock(productId));
 
@@ -69,6 +71,9 @@ function registerIpc() {
   ipcMain.handle("backup:exportEncrypted", () => services.exportEncrypted());
   ipcMain.handle("backup:importEncrypted", (_event, filePath) => services.importEncrypted(filePath));
   ipcMain.handle("backup:exportCsv", (_event, kind) => services.exportCsv(kind));
+  ipcMain.handle("backup:connectGoogleDrive", () => services.connectGoogleDrive());
+  ipcMain.handle("backup:disconnectGoogleDrive", () => services.disconnectGoogleDrive());
+  ipcMain.handle("backup:backupGoogleDriveNow", () => services.backupGoogleDriveNow());
 }
 
 function assertWindow() {
@@ -78,6 +83,7 @@ function assertWindow() {
 
 app.whenReady().then(async () => {
   await services.init();
+  services.startGoogleDriveAutoBackupScheduler();
   registerIpc();
   await createWindow();
 });

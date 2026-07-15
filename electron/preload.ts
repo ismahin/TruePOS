@@ -12,11 +12,13 @@ const api: TruePOSApi = {
   products: {
     create: (input) => invoke("products:create", input),
     update: (id, input) => invoke("products:update", id, input),
+    delete: (id) => invoke("products:delete", id),
     search: (query) => invoke("products:search", query),
+    list: (params) => invoke("products:list", params),
     importCsv: (csv) => invoke("products:importCsv", csv)
   },
   inventory: {
-    adjust: (productId, quantity, note) => invoke("inventory:adjust", productId, quantity, note),
+    adjust: (productId, quantity, note, type) => invoke("inventory:adjust", productId, quantity, note, type),
     listMovements: (productId) => invoke("inventory:listMovements", productId),
     getStock: (productId) => invoke("inventory:getStock", productId)
   },
@@ -46,7 +48,10 @@ const api: TruePOSApi = {
   backup: {
     exportEncrypted: () => invoke("backup:exportEncrypted"),
     importEncrypted: (filePath) => invoke("backup:importEncrypted", filePath),
-    exportCsv: (kind) => invoke("backup:exportCsv", kind)
+    exportCsv: (kind) => invoke("backup:exportCsv", kind),
+    connectGoogleDrive: () => invoke("backup:connectGoogleDrive"),
+    disconnectGoogleDrive: () => invoke("backup:disconnectGoogleDrive"),
+    backupGoogleDriveNow: () => invoke("backup:backupGoogleDriveNow")
   }
 };
 

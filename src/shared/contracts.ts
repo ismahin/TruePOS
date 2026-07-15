@@ -80,6 +80,11 @@ export type ReceiptSettings = {
   language: "en" | "bn";
   padding: number;
   logoDataUrl: string;
+  logoWidthMm: number;
+  logoHeightMm: number;
+  logoScale: number;
+  logoOffsetX: number;
+  logoOffsetY: number;
   header: string;
   footer: string;
   showVatBreakdown: boolean;
@@ -94,6 +99,15 @@ export type BarcodeSettings = {
   showPrice: boolean;
 };
 
+export type GoogleDriveBackupSettings = {
+  connected: boolean;
+  accountEmail: string;
+  autoBackupEnabled: boolean;
+  backupTime: string;
+  lastBackupAt: string;
+  lastBackupStatus: string;
+};
+
 export type AppSettings = {
   shopName: string;
   currency: "BDT";
@@ -102,6 +116,7 @@ export type AppSettings = {
   printerMode: "windows" | "escpos";
   receipt: ReceiptSettings;
   barcode: BarcodeSettings;
+  googleDrive: GoogleDriveBackupSettings;
 };
 
 export type SalesReport = {
@@ -139,12 +154,14 @@ export type AuthApi = {
 export type ProductApi = {
   create(input: ProductInput): Promise<Product>;
   update(id: string, input: Partial<ProductInput>): Promise<Product>;
+  delete(id: string): Promise<Product>;
   search(query: string): Promise<Product[]>;
+  list(params?: { query?: string; includeInactive?: boolean; lowStockOnly?: boolean; category?: string }): Promise<Product[]>;
   importCsv(csv: string): Promise<{ imported: number; skipped: number }>;
 };
 
 export type InventoryApi = {
-  adjust(productId: string, quantity: number, note: string): Promise<Product>;
+  adjust(productId: string, quantity: number, note: string, type?: "stock_in" | "stock_out" | "adjustment"): Promise<Product>;
   listMovements(productId?: string): Promise<InventoryMovement[]>;
   getStock(productId: string): Promise<number>;
 };
@@ -178,8 +195,11 @@ export type SettingsApi = {
 
 export type BackupApi = {
   exportEncrypted(): Promise<string>;
-  importEncrypted(filePath: string): Promise<void>;
+  importEncrypted(filePath?: string): Promise<string>;
   exportCsv(kind: "products" | "inventory" | "sales"): Promise<string>;
+  connectGoogleDrive(): Promise<AppSettings>;
+  disconnectGoogleDrive(): Promise<AppSettings>;
+  backupGoogleDriveNow(): Promise<AppSettings>;
 };
 
 export type TruePOSApi = {

@@ -1,9 +1,10 @@
-import { app, BrowserWindow, dialog } from "electron";
+import { app, BrowserWindow, dialog, shell } from "electron";
 import type { BrowserWindow as BrowserWindowType } from "electron";
 import Database from "better-sqlite3-multiple-ciphers";
 import bwipjs from "bwip-js";
 import crypto from "node:crypto";
 import fs from "node:fs";
+import http from "node:http";
 import path from "node:path";
 import Papa from "papaparse";
 import { v4 as uuid } from "uuid";
@@ -26,6 +27,9 @@ type Row = Record<string, unknown>;
 
 const serviceName = "TruePOS";
 const dbPasswordAccount = "local-database-key";
+const googleDriveRefreshTokenAccount = "google-drive-refresh-token";
+const googleDriveScopes = ["openid", "email", "profile", "https://www.googleapis.com/auth/drive.file"].join(" ");
+const bundledGoogleDriveClientId = "";
 
 const defaultSettings: AppSettings = {
   shopName: "TruePOS Store",
@@ -40,6 +44,11 @@ const defaultSettings: AppSettings = {
     language: "en",
     padding: 8,
     logoDataUrl: "",
+    logoWidthMm: 32,
+    logoHeightMm: 16,
+    logoScale: 100,
+    logoOffsetX: 0,
+    logoOffsetY: 0,
     header: "Offline POS\nDhaka, Bangladesh",
     footer: "Thank you for shopping",
     showVatBreakdown: true
@@ -51,8 +60,35 @@ const defaultSettings: AppSettings = {
     padding: 6,
     showName: true,
     showPrice: true
+  },
+  googleDrive: {
+    connected: false,
+    accountEmail: "",
+    autoBackupEnabled: false,
+    backupTime: "22:00",
+    lastBackupAt: "",
+    lastBackupStatus: ""
   }
 };
+
+function mergeSettings(settings: Partial<AppSettings>): AppSettings {
+  return {
+    ...defaultSettings,
+    ...settings,
+    receipt: {
+      ...defaultSettings.receipt,
+      ...settings.receipt
+    },
+    barcode: {
+      ...defaultSettings.barcode,
+      ...settings.barcode
+    },
+    googleDrive: {
+      ...defaultSettings.googleDrive,
+      ...settings.googleDrive
+    }
+  };
+}
 
 function now() {
   return new Date().toISOString();
@@ -112,6 +148,8 @@ function isUnreadableDatabaseError(error: unknown) {
 export class TruePOSServices {
   private db!: Database;
   private currentUser: User | null = null;
+  private googleDriveBackupTimer: NodeJS.Timeout | null = null;
+  private googleDriveBackupRunning = false;
 
   async init() {
     const dbPath = path.join(dataDir(), "truepos.db");
@@ -354,6 +392,14 @@ export class TruePOSServices {
     return productFromRow(this.db.prepare("SELECT * FROM products WHERE id = ?").get<Row>(id)!);
   }
 
+  async deleteProduct(id: string) {
+    this.requireAdmin();
+    const existing = this.db.prepare("SELECT * FROM products WHERE id = ?").get<Row>(id);
+    if (!existing) throw new Error("Product not found.");
+    this.db.prepare("UPDATE products SET is_active = 0, updated_at = ? WHERE id = ?").run(now(), id);
+    return productFromRow(this.db.prepare("SELECT * FROM products WHERE id = ?").get<Row>(id)!);
+  }
+
   async searchProducts(query: string) {
     const q = `%${query.trim()}%`;
     return this.db
@@ -363,6 +409,34 @@ export class TruePOSServices {
         ORDER BY name LIMIT 100`
       )
       .all<Row>(q, q, q, q, q)
+      .map(productFromRow);
+  }
+
+  async listProducts(params?: { query?: string; includeInactive?: boolean; lowStockOnly?: boolean; category?: string }) {
+    const filters = params ?? {};
+    const query = `%${(filters.query ?? "").trim()}%`;
+    const category = (filters.category ?? "").trim();
+    return this.db
+      .prepare(
+        `SELECT * FROM products
+         WHERE (? = 1 OR is_active = 1)
+           AND (? = '%%' OR sku LIKE ? OR barcode LIKE ? OR name LIKE ? OR category LIKE ?)
+           AND (? = '' OR category = ?)
+           AND (? = 0 OR stock <= low_stock_threshold)
+         ORDER BY is_active DESC, name ASC
+         LIMIT 500`
+      )
+      .all<Row>(
+        filters.includeInactive ? 1 : 0,
+        query,
+        query,
+        query,
+        query,
+        query,
+        category,
+        category,
+        filters.lowStockOnly ? 1 : 0
+      )
       .map(productFromRow);
   }
 
@@ -394,10 +468,14 @@ export class TruePOSServices {
     return { imported, skipped };
   }
 
-  async adjustInventory(productId: string, quantity: number, note: string) {
+  async adjustInventory(productId: string, quantity: number, note: string, type: InventoryMovement["type"] = "adjustment") {
     this.requireAdmin();
+    const product = this.db.prepare("SELECT * FROM products WHERE id = ?").get<Row>(productId);
+    if (!product) throw new Error("Product not found.");
+    const nextStock = Number(product.stock) + quantity;
+    if (nextStock < 0) throw new Error("Stock cannot go below zero.");
     this.db.prepare("UPDATE products SET stock = stock + ?, updated_at = ? WHERE id = ?").run(quantity, now(), productId);
-    this.addMovement(productId, "adjustment", quantity, note || "Manual adjustment");
+    this.addMovement(productId, type, quantity, note || "Manual adjustment");
     return productFromRow(this.db.prepare("SELECT * FROM products WHERE id = ?").get<Row>(productId)!);
   }
 
@@ -611,13 +689,21 @@ export class TruePOSServices {
 
   async getSettings(): Promise<AppSettings> {
     const row = this.db.prepare("SELECT value FROM settings WHERE key = 'app'").get<{ value: string }>();
-    return row ? { ...defaultSettings, ...JSON.parse(row.value) } : defaultSettings;
+    return row ? mergeSettings(JSON.parse(row.value)) : defaultSettings;
   }
 
   async updateSettings(settings: Partial<AppSettings>) {
     this.requireAdmin();
-    const next = { ...(await this.getSettings()), ...settings };
+    const current = await this.getSettings();
+    const next = mergeSettings({
+      ...current,
+      ...settings,
+      receipt: { ...current.receipt, ...settings.receipt },
+      barcode: { ...current.barcode, ...settings.barcode },
+      googleDrive: { ...current.googleDrive, ...settings.googleDrive }
+    });
     this.db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('app', ?)").run(JSON.stringify(next));
+    this.startGoogleDriveAutoBackupScheduler();
     return next;
   }
 
@@ -628,25 +714,30 @@ export class TruePOSServices {
   async printReceipt(window: BrowserWindowType, saleId?: string) {
     const settings = await this.getSettings();
     const text = saleId ? await this.getReceipt(saleId) : buildReceiptText(this.sampleSale(), settings);
-    const html = `<html><head><style>${receiptStyle(settings.receipt)}</style></head><body>${settings.receipt.logoDataUrl ? `<img class="logo" src="${settings.receipt.logoDataUrl}" />` : ""}<pre>${escapeHtml(text)}</pre></body></html>`;
+    const logo = settings.receipt.logoDataUrl ? `<div class="logo-wrap"><img class="logo" src="${settings.receipt.logoDataUrl}" /></div>` : "";
+    const html = `<html><head><style>${receiptStyle(settings.receipt)}</style></head><body>${logo}<pre>${escapeHtml(text)}</pre></body></html>`;
     await this.printHtml(window, html, settings.receiptPrinter);
   }
 
   async printBarcode(window: BrowserWindowType, productId: string, quantity: number) {
     const settings = await this.getSettings();
     const product = productFromRow(this.db.prepare("SELECT * FROM products WHERE id = ?").get<Row>(productId)!);
-    const png = await bwipjs.toBuffer({ bcid: "code128", text: product.barcode, scale: 2, height: 12, includetext: true });
+    const png = await bwipjs.toBuffer({ bcid: "code128", text: product.barcode, scale: 2, height: 10, includetext: false });
     const labels = Array.from({ length: Math.max(1, quantity) }, () => {
       return `<section class="label">
         ${settings.barcode.showName ? `<strong>${escapeHtml(product.name)}</strong>` : ""}
-        <img src="data:image/png;base64,${png.toString("base64")}" />
+        <div class="barcode-box"><img src="data:image/png;base64,${png.toString("base64")}" /></div>
+        <small>${escapeHtml(product.barcode)}</small>
         ${settings.barcode.showPrice ? `<span>${escapeHtml(product.price.toFixed(2))} BDT</span>` : ""}
       </section>`;
     }).join("");
     const html = `<html><head><style>
       body{margin:0;padding:0;font-family:Arial;color:#111827}
-      .label{box-sizing:border-box;width:${settings.barcode.labelWidthMm}mm;height:${settings.barcode.labelHeightMm}mm;padding:${settings.barcode.padding}px;display:flex;flex-direction:column;align-items:center;justify-content:center;break-after:page}
-      img{max-width:100%;height:auto} strong,span{font-size:10px;line-height:1.1;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+      .label{box-sizing:border-box;width:${settings.barcode.labelWidthMm}mm;height:${settings.barcode.labelHeightMm}mm;padding:${settings.barcode.padding}px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;break-after:page;overflow:hidden}
+      .barcode-box{width:100%;min-height:12mm;flex:1;display:flex;align-items:center;justify-content:center;overflow:hidden}
+      img{display:block;max-width:100%;max-height:100%;object-fit:contain}
+      strong,span,small{font-size:9px;line-height:1.05;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+      small{font-size:8px}
     </style></head><body>${labels}</body></html>`;
     await this.printHtml(window, html, settings.barcodePrinter);
   }
@@ -658,12 +749,33 @@ export class TruePOSServices {
     return target;
   }
 
-  async importEncrypted(filePath: string) {
+  async importEncrypted(filePath?: string) {
     this.requireAdmin();
-    if (!fs.existsSync(filePath)) throw new Error("Backup file not found.");
+    const selectedPath =
+      filePath ||
+      dialog.showOpenDialogSync({
+        title: "Import encrypted TruePOS backup",
+        properties: ["openFile"],
+        filters: [{ name: "TruePOS backup", extensions: ["db", "sqlite", "backup"] }]
+      })?.[0];
+    if (!selectedPath) throw new Error("Import cancelled.");
+    if (!fs.existsSync(selectedPath)) throw new Error("Backup file not found.");
+    const dbPath = path.join(dataDir(), "truepos.db");
+    const rollbackPath = path.join(dataDir(), `truepos-rollback-${Date.now()}.db`);
     this.close();
-    fs.copyFileSync(filePath, path.join(dataDir(), "truepos.db"));
-    await this.init();
+    if (fs.existsSync(dbPath)) fs.copyFileSync(dbPath, rollbackPath);
+    try {
+      fs.copyFileSync(selectedPath, dbPath);
+      await this.init();
+      if (fs.existsSync(rollbackPath)) fs.rmSync(rollbackPath, { force: true });
+      return selectedPath;
+    } catch (error) {
+      if (fs.existsSync(rollbackPath)) fs.copyFileSync(rollbackPath, dbPath);
+      await this.init();
+      throw error;
+    } finally {
+      if (fs.existsSync(rollbackPath)) fs.rmSync(rollbackPath, { force: true });
+    }
   }
 
   async exportCsv(kind: "products" | "inventory" | "sales") {
@@ -676,6 +788,184 @@ export class TruePOSServices {
     if (!target) throw new Error("Export cancelled.");
     fs.writeFileSync(target, csv, "utf8");
     return target;
+  }
+
+  async connectGoogleDrive() {
+    this.requireAdmin();
+    const settings = await this.getSettings();
+    const clientId = this.getGoogleDriveClientId(settings);
+    if (!clientId) throw new Error("Google Drive backup is not configured for this TruePOS build.");
+    const token = await this.authorizeGoogleDrive(clientId);
+    if (!token.refresh_token) throw new Error("Google did not return a refresh token. Remove app access from Google Account settings and connect again.");
+    await keytar.setPassword(serviceName, googleDriveRefreshTokenAccount, token.refresh_token);
+    const accountEmail = await this.getGoogleAccountEmail(token.access_token);
+    const next = mergeSettings({
+      ...settings,
+      googleDrive: {
+        ...settings.googleDrive,
+        connected: true,
+        accountEmail,
+        lastBackupStatus: "Google Drive connected."
+      }
+    });
+    this.saveSettings(next);
+    this.startGoogleDriveAutoBackupScheduler();
+    return next;
+  }
+
+  async disconnectGoogleDrive() {
+    this.requireAdmin();
+    await keytar.deletePassword(serviceName, googleDriveRefreshTokenAccount);
+    const settings = await this.getSettings();
+    const next = mergeSettings({
+      ...settings,
+      googleDrive: {
+        ...settings.googleDrive,
+        connected: false,
+        accountEmail: "",
+        autoBackupEnabled: false,
+        lastBackupStatus: "Google Drive disconnected."
+      }
+    });
+    this.saveSettings(next);
+    this.startGoogleDriveAutoBackupScheduler();
+    return next;
+  }
+
+  async backupGoogleDriveNow() {
+    this.requireAdmin();
+    return this.uploadGoogleDriveBackup("Manual Google Drive backup completed.");
+  }
+
+  startGoogleDriveAutoBackupScheduler() {
+    if (this.googleDriveBackupTimer) {
+      clearInterval(this.googleDriveBackupTimer);
+      this.googleDriveBackupTimer = null;
+    }
+    this.googleDriveBackupTimer = setInterval(() => {
+      this.runScheduledGoogleDriveBackup().catch(() => undefined);
+    }, 60_000);
+  }
+
+  private async runScheduledGoogleDriveBackup() {
+    const settings = await this.getSettings();
+    if (!settings.googleDrive.connected || !settings.googleDrive.autoBackupEnabled) return;
+    if (!/^\d{2}:\d{2}$/.test(settings.googleDrive.backupTime)) return;
+    const nowDate = new Date();
+    const today = nowDate.toISOString().slice(0, 10);
+    const currentTime = `${String(nowDate.getHours()).padStart(2, "0")}:${String(nowDate.getMinutes()).padStart(2, "0")}`;
+    if (currentTime !== settings.googleDrive.backupTime) return;
+    if (settings.googleDrive.lastBackupAt.startsWith(today)) return;
+    await this.uploadGoogleDriveBackup("Automatic Google Drive backup completed.");
+  }
+
+  private async uploadGoogleDriveBackup(successMessage: string) {
+    if (this.googleDriveBackupRunning) throw new Error("Google Drive backup is already running.");
+    this.googleDriveBackupRunning = true;
+    const settings = await this.getSettings();
+    try {
+      const clientId = this.getGoogleDriveClientId(settings);
+      if (!clientId) throw new Error("Google Drive backup is not configured for this TruePOS build.");
+      const accessToken = await this.refreshGoogleAccessToken(clientId);
+      const backupPath = path.join(app.getPath("temp"), `truepos-drive-backup-${Date.now()}.db`);
+      await this.db.backup(backupPath);
+      const uploaded = await this.uploadFileToGoogleDrive(accessToken, backupPath);
+      fs.rmSync(backupPath, { force: true });
+      const next = mergeSettings({
+        ...settings,
+        googleDrive: {
+          ...settings.googleDrive,
+          connected: true,
+          lastBackupAt: now(),
+          lastBackupStatus: `${successMessage} File: ${uploaded.name}`
+        }
+      });
+      this.saveSettings(next);
+      return next;
+    } catch (error) {
+      const next = mergeSettings({
+        ...settings,
+        googleDrive: {
+          ...settings.googleDrive,
+          lastBackupStatus: error instanceof Error ? error.message : "Google Drive backup failed."
+        }
+      });
+      this.saveSettings(next);
+      throw error;
+    } finally {
+      this.googleDriveBackupRunning = false;
+    }
+  }
+
+  private async authorizeGoogleDrive(clientId: string): Promise<{ access_token: string; refresh_token?: string }> {
+    const verifier = base64Url(crypto.randomBytes(32));
+    const challenge = base64Url(crypto.createHash("sha256").update(verifier).digest());
+    const state = base64Url(crypto.randomBytes(16));
+    const { code, redirectUri } = await waitForGoogleOAuthCode(clientId, state, challenge);
+    const body = new URLSearchParams({
+      client_id: clientId,
+      code,
+      code_verifier: verifier,
+      grant_type: "authorization_code",
+      redirect_uri: redirectUri
+    });
+    const response = await fetch("https://oauth2.googleapis.com/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body
+    });
+    if (!response.ok) throw new Error(`Google token exchange failed: ${await response.text()}`);
+    return response.json() as Promise<{ access_token: string; refresh_token?: string }>;
+  }
+
+  private async refreshGoogleAccessToken(clientId: string) {
+    const refreshToken = await keytar.getPassword(serviceName, googleDriveRefreshTokenAccount);
+    if (!refreshToken) throw new Error("Google Drive is not connected.");
+    const response = await fetch("https://oauth2.googleapis.com/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        client_id: clientId,
+        refresh_token: refreshToken,
+        grant_type: "refresh_token"
+      })
+    });
+    if (!response.ok) throw new Error(`Google token refresh failed: ${await response.text()}`);
+    const token = (await response.json()) as { access_token: string };
+    return token.access_token;
+  }
+
+  private async getGoogleAccountEmail(accessToken: string) {
+    const response = await fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
+      headers: { Authorization: `Bearer ${accessToken}` }
+    });
+    if (!response.ok) return "";
+    const profile = (await response.json()) as { email?: string };
+    return profile.email ?? "";
+  }
+
+  private async uploadFileToGoogleDrive(accessToken: string, filePath: string): Promise<{ id: string; name: string }> {
+    const fileName = `truepos-backup-${new Date().toISOString().replace(/[:.]/g, "-")}.db`;
+    const boundary = `truepos-${crypto.randomBytes(12).toString("hex")}`;
+    const metadata = JSON.stringify({ name: fileName, mimeType: "application/octet-stream" });
+    const fileContent = fs.readFileSync(filePath);
+    const body = Buffer.concat([
+      Buffer.from(`--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${metadata}\r\n`),
+      Buffer.from(`--${boundary}\r\nContent-Type: application/octet-stream\r\n\r\n`),
+      fileContent,
+      Buffer.from(`\r\n--${boundary}--\r\n`)
+    ]);
+    const response = await fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": `multipart/related; boundary=${boundary}`,
+        "Content-Length": String(body.length)
+      },
+      body
+    });
+    if (!response.ok) throw new Error(`Google Drive upload failed: ${await response.text()}`);
+    return response.json() as Promise<{ id: string; name: string }>;
   }
 
   private addMovement(productId: string, type: InventoryMovement["type"], quantity: number, note: string) {
@@ -764,8 +1054,103 @@ export class TruePOSServices {
       createdAt: now()
     };
   }
+
+  private saveSettings(settings: AppSettings) {
+    this.db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('app', ?)").run(JSON.stringify(settings));
+  }
+
+  private getGoogleDriveClientId(settings?: AppSettings) {
+    const legacySettingsClientId = settings ? String((settings.googleDrive as unknown as { clientId?: string }).clientId ?? "").trim() : "";
+    const configPaths = [
+      process.env.TRUEPOS_GOOGLE_CLIENT_CONFIG,
+      app.isPackaged ? path.join(process.resourcesPath, "google-drive-oauth.json") : path.join(process.cwd(), "google-drive-oauth.json"),
+      app.isPackaged ? path.join(path.dirname(process.execPath), "google-drive-oauth.json") : "",
+      path.join(app.getPath("appData"), "TruePOS", "google-drive-oauth.json")
+    ].filter(Boolean) as string[];
+    const fileClientId = configPaths.map(readGoogleClientId).find(Boolean) ?? "";
+    return process.env.TRUEPOS_GOOGLE_CLIENT_ID?.trim() || fileClientId || bundledGoogleDriveClientId || legacySettingsClientId;
+  }
 }
 
 function escapeHtml(value: string) {
   return value.replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]!);
+}
+
+function base64Url(buffer: Buffer) {
+  return buffer.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function readGoogleClientId(configPath: string) {
+  try {
+    if (!fs.existsSync(configPath)) return "";
+    const config = JSON.parse(fs.readFileSync(configPath, "utf8")) as { clientId?: string; installed?: { client_id?: string } };
+    const clientId = String(config.clientId || config.installed?.client_id || "").trim();
+    if (!clientId || clientId.startsWith("YOUR_")) return "";
+    return clientId;
+  } catch {
+    return "";
+  }
+}
+
+function waitForGoogleOAuthCode(clientId: string, state: string, challenge: string) {
+  return new Promise<{ code: string; redirectUri: string }>((resolve, reject) => {
+    let settled = false;
+    let timeout: NodeJS.Timeout | undefined;
+    const finish = (error?: Error, value?: { code: string; redirectUri: string }) => {
+      if (settled) return;
+      settled = true;
+      if (timeout) clearTimeout(timeout);
+      server.close();
+      if (error) reject(error);
+      else if (value) resolve(value);
+    };
+    const server = http.createServer((request, response) => {
+      const host = request.headers.host ?? "";
+      const requestUrl = new URL(request.url ?? "/", `http://${host}`);
+      if (requestUrl.pathname !== "/oauth2callback") {
+        response.writeHead(404);
+        response.end("Not found");
+        return;
+      }
+      const returnedState = requestUrl.searchParams.get("state");
+      const code = requestUrl.searchParams.get("code");
+      const error = requestUrl.searchParams.get("error");
+      if (returnedState !== state) {
+        response.writeHead(400, { "Content-Type": "text/html" });
+        response.end("<h2>TruePOS Google Drive connection failed</h2><p>Invalid OAuth state.</p>");
+        finish(new Error("Invalid Google OAuth state."));
+      } else if (error) {
+        response.writeHead(400, { "Content-Type": "text/html" });
+        response.end(`<h2>TruePOS Google Drive connection failed</h2><p>${escapeHtml(error)}</p>`);
+        finish(new Error(`Google OAuth failed: ${error}`));
+      } else if (code) {
+        response.writeHead(200, { "Content-Type": "text/html" });
+        response.end("<h2>TruePOS Google Drive connected</h2><p>You can close this browser tab and return to TruePOS.</p>");
+        finish(undefined, { code, redirectUri: `http://127.0.0.1:${(server.address() as { port: number }).port}/oauth2callback` });
+      }
+    });
+
+    server.on("error", (error) => finish(error));
+    server.listen(0, "127.0.0.1", () => {
+      const port = (server.address() as { port: number }).port;
+      const redirectUri = `http://127.0.0.1:${port}/oauth2callback`;
+      const authUrl = new URL("https://accounts.google.com/o/oauth2/v2/auth");
+      authUrl.search = new URLSearchParams({
+        client_id: clientId,
+        redirect_uri: redirectUri,
+        response_type: "code",
+        scope: googleDriveScopes,
+        access_type: "offline",
+        prompt: "consent",
+        state,
+        code_challenge: challenge,
+        code_challenge_method: "S256"
+      }).toString();
+      shell.openExternal(authUrl.toString()).catch((error) => {
+        finish(error);
+      });
+    });
+
+    timeout = setTimeout(() => finish(new Error("Google Drive connection timed out.")), 180_000);
+  });
 }
