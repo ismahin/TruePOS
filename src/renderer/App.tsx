@@ -1,6 +1,7 @@
 import { AlertTriangle, Banknote, BarChart3, Bell, Boxes, CreditCard, Download, Edit3, LogOut, Minus, PackagePlus, Pause, Plus, Printer, Receipt, RefreshCw, RotateCcw, Search, Settings, ShoppingCart, Tag, Trash2, Upload, X } from "lucide-react";
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AppSettings, AppUpdateState, CartLine, InventoryMovement, InventoryValueReport, Product, ProductInput, ProductSalesReport, Sale, SalesReport, User } from "../shared/contracts";
+import { heldCartLabel, nextHeldCartNumber, normalizeHeldCarts, type HeldCart } from "../shared/held-carts";
 import { buildReceiptHtml, calculatePaymentBalance, calculateTotals, formatBdt } from "../shared/pos";
 import { XP365B_SAFE_RECEIPT_WIDTH_DOTS } from "../shared/xprinter";
 import logoUrl from "./assets/truepos-logo-v4.png";
@@ -741,14 +742,8 @@ function Billing({ notify }: { notify: Notify }) {
   );
 }
 
-type HeldCart = {
-  id: string;
-  label: string;
-  createdAt: string;
-  lines: CartLine[];
-};
-
 const heldCartStorageKey = "truepos.heldCarts";
+const heldCartSequenceStorageKey = "truepos.heldCartNextNumber";
 
 function EnhancedBilling({ notify }: { notify: Notify }) {
   const [query, setQuery] = useState("");
@@ -762,6 +757,7 @@ function EnhancedBilling({ notify }: { notify: Notify }) {
   const [invoicePreview, setInvoicePreview] = useState("");
   const [busy, setBusy] = useState(false);
   const scanInputRef = useRef<HTMLInputElement>(null);
+  const nextHoldNumberRef = useRef(1);
   const totals = useMemo(() => calculateTotals(cart), [cart]);
   const trimmedQuery = query.trim();
   const hasQuery = trimmedQuery.length > 0;
@@ -783,14 +779,21 @@ function EnhancedBilling({ notify }: { notify: Notify }) {
   }, [hasQuery, trimmedQuery, notify]);
 
   useEffect(() => {
+    const storedNext = window.localStorage.getItem(heldCartSequenceStorageKey);
     const stored = window.localStorage.getItem(heldCartStorageKey);
-    if (!stored) return;
+    if (!stored) {
+      nextHoldNumberRef.current = nextHeldCartNumber([], storedNext);
+      return;
+    }
     try {
       const parsed = JSON.parse(stored) as unknown;
-      if (Array.isArray(parsed)) setHeldCarts(parsed as HeldCart[]);
-      else window.localStorage.removeItem(heldCartStorageKey);
+      const normalized = normalizeHeldCarts(parsed);
+      nextHoldNumberRef.current = nextHeldCartNumber(normalized, storedNext);
+      window.localStorage.setItem(heldCartSequenceStorageKey, String(nextHoldNumberRef.current));
+      setHeldCarts(normalized);
     } catch {
       window.localStorage.removeItem(heldCartStorageKey);
+      nextHoldNumberRef.current = nextHeldCartNumber([], storedNext);
     }
   }, []);
 
@@ -803,16 +806,19 @@ function EnhancedBilling({ notify }: { notify: Notify }) {
       notify("The cart is empty. Add a product before holding the sale.", "error");
       return;
     }
+    const holdNumber = nextHoldNumberRef.current;
+    nextHoldNumberRef.current += 1;
+    window.localStorage.setItem(heldCartSequenceStorageKey, String(nextHoldNumberRef.current));
     const held: HeldCart = {
       id: crypto.randomUUID(),
-      label: `Hold ${heldCarts.length + 1} - ${new Date().toLocaleTimeString()}`,
+      holdNumber,
       createdAt: new Date().toISOString(),
       lines: cart
     };
-    setHeldCarts([held, ...heldCarts]);
+    setHeldCarts((current) => [held, ...current]);
     setCart([]);
     setPaid(0);
-    notify(`${held.label} saved.`);
+    notify(`${heldCartLabel(held)} saved.`);
   };
 
   const openInvoicePreview = async () => {
@@ -932,7 +938,7 @@ function EnhancedBilling({ notify }: { notify: Notify }) {
       return;
     }
     setCart(held.lines);
-    setHeldCarts(heldCarts.filter((item) => item.id !== held.id));
+    setHeldCarts((current) => current.filter((item) => item.id !== held.id));
     scanInputRef.current?.focus();
   };
 
@@ -992,7 +998,7 @@ function EnhancedBilling({ notify }: { notify: Notify }) {
           {heldCarts.length === 0 && <small>No suspended sale</small>}
           {heldCarts.map((held) => (
             <button key={held.id} className="held-sale" onClick={() => resumeCart(held)}>
-              <span>{held.label}</span>
+              <span>{heldCartLabel(held)}</span>
               <b>{held.lines.reduce((sum, line) => sum + line.quantity, 0)} items</b>
             </button>
           ))}

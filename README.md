@@ -64,7 +64,7 @@ release/
 The latest local installer from this development build is:
 
 ```text
-release/TruePOS-Setup-0.1.27.exe
+release/TruePOS-Setup-0.1.28.exe
 ```
 
 The NSIS installer is configured for per-machine installation, so it installs into Program Files when elevated, while keeping user data under AppData.
