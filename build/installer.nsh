@@ -8,6 +8,14 @@
   FileWrite $R9 "TruePOS ${VERSION} installation log$\r$\n"
   FileWrite $R9 "Application files installed in: $INSTDIR$\r$\n"
   DetailPrint "TruePOS application files installed."
+
+  ${If} ${Silent}
+    DetailPrint "Automatic update detected; keeping the existing Xprinter driver."
+    FileWrite $R9 "Silent automatic update: existing Xprinter driver setup preserved.$\r$\n"
+    FileClose $R9
+    Goto driver_finished
+  ${EndIf}
+
   DetailPrint "Preparing the Xprinter 2-in-1 driver..."
   FileWrite $R9 "Preparing the Xprinter 2-in-1 driver.$\r$\n"
 

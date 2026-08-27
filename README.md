@@ -64,12 +64,18 @@ release/
 The latest local installer from this development build is:
 
 ```text
-release/TruePOS Setup 0.1.24.exe
+release/TruePOS-Setup-0.1.25.exe
 ```
 
 The NSIS installer is configured for per-machine installation, so it installs into Program Files when elevated, while keeping user data under AppData.
 
 The installer also bundles the signed Seagull Xprinter driver package and starts its official DriverWizard after the TruePOS files are installed. Connect and power on the XP-365B before starting setup, then complete the printer-detection step in DriverWizard. Live driver-installation details are displayed in the installer and saved to `installation.log` inside the TruePOS installation directory.
+
+### Software updates
+
+Installed builds check the public `ismahin/TruePOS` GitHub releases automatically at startup and every six hours while running. When an update is available, Settings displays a notification badge and an **Update** button. TruePOS downloads the verified release in the background, then **Restart and Update** closes the app, installs the update, and opens the new version without requiring the user to download and run another installer manually.
+
+The notification badge is cleared after the user opens Settings for that release, while the update controls remain available until the update is installed. Update activity is recorded in the application logs as `truepos-updates.log`.
 
 ## Google Drive Backup
 

@@ -2,8 +2,10 @@ import { app, BrowserWindow, ipcMain } from "electron";
 import type { BrowserWindow as BrowserWindowType } from "electron";
 import path from "node:path";
 import { TruePOSServices } from "./services.js";
+import { TruePOSUpdater } from "./updater.js";
 
 const services = new TruePOSServices();
+const updater = new TruePOSUpdater();
 let mainWindow: BrowserWindowType | null = null;
 const appIconPath = app.isPackaged ? path.join(process.resourcesPath, "icon.png") : path.join(__dirname, "../../build/icon.png");
 
@@ -82,6 +84,11 @@ function registerIpc() {
   ipcMain.handle("backup:disconnectGoogleDrive", () => services.disconnectGoogleDrive());
   ipcMain.handle("backup:backupGoogleDriveNow", () => services.backupGoogleDriveNow());
   ipcMain.handle("backup:factoryReset", () => services.factoryReset());
+
+  ipcMain.handle("updates:getState", () => updater.getState());
+  ipcMain.handle("updates:check", () => updater.check());
+  ipcMain.handle("updates:download", () => updater.download());
+  ipcMain.handle("updates:install", () => updater.install());
 }
 
 function assertWindow() {
@@ -94,6 +101,7 @@ app.whenReady().then(async () => {
   services.startGoogleDriveAutoBackupScheduler();
   registerIpc();
   await createWindow();
+  updater.start(assertWindow());
 });
 
 app.on("window-all-closed", () => {
@@ -104,4 +112,7 @@ app.on("activate", () => {
   if (BrowserWindow.getAllWindows().length === 0) void createWindow();
 });
 
-app.on("before-quit", () => services.close());
+app.on("before-quit", () => {
+  updater.stop();
+  services.close();
+});

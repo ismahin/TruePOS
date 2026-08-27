@@ -149,6 +149,17 @@ export type InventoryValueReport = {
   lowStockCount: number;
 };
 
+export type AppUpdateStatus = "disabled" | "idle" | "checking" | "up-to-date" | "available" | "downloading" | "downloaded" | "error";
+
+export type AppUpdateState = {
+  status: AppUpdateStatus;
+  currentVersion: string;
+  availableVersion: string;
+  percent: number;
+  message: string;
+  checkedAt: string;
+};
+
 export type AuthApi = {
   login(username: string, password: string): Promise<User>;
   logout(): Promise<void>;
@@ -214,6 +225,14 @@ export type BackupApi = {
   factoryReset(): Promise<void>;
 };
 
+export type UpdateApi = {
+  getState(): Promise<AppUpdateState>;
+  check(): Promise<AppUpdateState>;
+  download(): Promise<AppUpdateState>;
+  install(): Promise<void>;
+  onStateChanged(listener: (state: AppUpdateState) => void): () => void;
+};
+
 export type TruePOSApi = {
   auth: AuthApi;
   products: ProductApi;
@@ -223,4 +242,5 @@ export type TruePOSApi = {
   printing: PrintingApi;
   settings: SettingsApi;
   backup: BackupApi;
+  updates: UpdateApi;
 };

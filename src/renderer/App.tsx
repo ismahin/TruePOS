@@ -1,6 +1,6 @@
-import { AlertTriangle, Banknote, BarChart3, Boxes, CreditCard, Edit3, LogOut, Minus, PackagePlus, Pause, Plus, Printer, Receipt, RefreshCw, RotateCcw, Search, Settings, ShoppingCart, Tag, Trash2, Upload, X } from "lucide-react";
+import { AlertTriangle, Banknote, BarChart3, Bell, Boxes, CreditCard, Download, Edit3, LogOut, Minus, PackagePlus, Pause, Plus, Printer, Receipt, RefreshCw, RotateCcw, Search, Settings, ShoppingCart, Tag, Trash2, Upload, X } from "lucide-react";
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { AppSettings, CartLine, InventoryMovement, InventoryValueReport, Product, ProductInput, ProductSalesReport, Sale, SalesReport, User } from "../shared/contracts";
+import type { AppSettings, AppUpdateState, CartLine, InventoryMovement, InventoryValueReport, Product, ProductInput, ProductSalesReport, Sale, SalesReport, User } from "../shared/contracts";
 import { buildReceiptHtml, calculatePaymentBalance, calculateTotals, formatBdt } from "../shared/pos";
 import { XP365B_SAFE_RECEIPT_WIDTH_DOTS } from "../shared/xprinter";
 import logoUrl from "./assets/truepos-logo-v4.png";
@@ -8,6 +8,7 @@ import logoUrl from "./assets/truepos-logo-v4.png";
 type Screen = "billing" | "products" | "inventory" | "reports" | "settings";
 type NoticeKind = "success" | "error";
 type Notify = (message: string, kind?: NoticeKind) => void;
+const UPDATE_SEEN_VERSION_KEY = "truepos-update-seen-version";
 
 function isUserCancellation(error: unknown) {
   const message = error instanceof Error ? error.message : String(error ?? "");
@@ -113,6 +114,7 @@ function errorDialogTitle(message: string) {
   if (/report/i.test(message)) return "Report problem";
   if (/sale|payment|cart|invoice|billing/i.test(message)) return "Billing problem";
   if (/settings/i.test(message)) return "Settings problem";
+  if (/update|version/i.test(message)) return "Update problem";
   return "Unable to complete the action";
 }
 
@@ -124,6 +126,8 @@ export function App() {
   const [screen, setScreen] = useState<Screen>("billing");
   const [toast, setToast] = useState("");
   const [errorDialog, setErrorDialog] = useState<{ title: string; message: string } | null>(null);
+  const [updateState, setUpdateState] = useState<AppUpdateState | null>(null);
+  const [seenUpdateVersion, setSeenUpdateVersion] = useState(() => window.localStorage.getItem(UPDATE_SEEN_VERSION_KEY) ?? "");
 
   useEffect(() => {
     Promise.all([api.auth.isSetupRequired(), api.auth.getCurrentUser()])
@@ -138,6 +142,32 @@ export function App() {
         setErrorDialog({ title: "Startup problem", message });
       });
   }, []);
+
+  useEffect(() => {
+    let active = true;
+    const unsubscribe = api.updates.onStateChanged((state) => {
+      if (active) setUpdateState(state);
+    });
+    api.updates.getState().then((state) => {
+      if (active) setUpdateState(state);
+    }).catch(() => undefined);
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, []);
+
+  const hasAvailableUpdate = Boolean(
+    updateState?.availableVersion && ["available", "downloading", "downloaded"].includes(updateState.status)
+  );
+
+  useEffect(() => {
+    if (screen !== "settings" || !hasAvailableUpdate || !updateState?.availableVersion) return;
+    window.localStorage.setItem(UPDATE_SEEN_VERSION_KEY, updateState.availableVersion);
+    setSeenUpdateVersion(updateState.availableVersion);
+  }, [hasAvailableUpdate, screen, updateState?.availableVersion]);
+
+  const showUpdateNotice = hasAvailableUpdate && seenUpdateVersion !== updateState?.availableVersion;
 
   useEffect(() => {
     if (!user || screen === "billing") return;
@@ -216,7 +246,7 @@ export function App() {
           <NavButton active={screen === "products"} icon={<PackagePlus />} label="Products" onClick={() => setScreen("products")} />
           <NavButton active={screen === "inventory"} icon={<Boxes />} label="Inventory" onClick={() => setScreen("inventory")} />
           <NavButton active={screen === "reports"} icon={<BarChart3 />} label="Reports" onClick={() => setScreen("reports")} />
-          <NavButton active={screen === "settings"} icon={<Settings />} label="Settings" onClick={() => setScreen("settings")} />
+          <NavButton active={screen === "settings"} icon={<Settings />} label="Settings" notice={showUpdateNotice} onClick={() => setScreen("settings")} />
         </nav>
         <div className="user-card">
           <span>{user.username}</span>
@@ -241,6 +271,7 @@ export function App() {
           <SettingsScreen
             user={user}
             notify={notify}
+            updateState={updateState}
             onFactoryReset={() => {
               setUser(null);
               setSetupRequired(true);
@@ -579,11 +610,12 @@ function FirstRunSetup({ onComplete }: { onComplete: (user: User) => void }) {
   );
 }
 
-function NavButton(props: { active: boolean; icon: React.ReactNode; label: string; onClick: () => void }) {
+function NavButton(props: { active: boolean; icon: React.ReactNode; label: string; notice?: boolean; onClick: () => void }) {
   return (
-    <button className={`nav-button ${props.active ? "active" : ""}`} onClick={props.onClick}>
-      {props.icon}
-      {props.label}
+    <button className={`nav-button ${props.active ? "active" : ""}`} aria-label={props.notice ? `${props.label}, update available` : props.label} onClick={props.onClick}>
+      <span className="nav-button-icon">{props.icon}</span>
+      <span>{props.label}</span>
+      {props.notice && <span className="nav-update-notice" title="A TruePOS update is available"><Bell size={13} /></span>}
     </button>
   );
 }
@@ -2283,7 +2315,95 @@ function formatPercent(value: number) {
   return `${value.toFixed(1)}%`;
 }
 
-function SettingsScreen({ user, notify, onFactoryReset }: { user: User; notify: Notify; onFactoryReset: () => void }) {
+function SoftwareUpdatePanel({ state, notify }: { state: AppUpdateState | null; notify: Notify }) {
+  const checkForUpdates = async () => {
+    try {
+      const next = await api.updates.check();
+      if (next.status === "up-to-date") notify("TruePOS is already up to date.");
+      if (next.status === "available") notify(`TruePOS ${next.availableVersion} is available.`);
+      if (next.status === "error") notify(next.message, "error");
+    } catch (error) {
+      notify(friendlyErrorMessage(error, "TruePOS could not check for updates. Check the internet connection and try again."), "error");
+    }
+  };
+
+  const downloadUpdate = async () => {
+    try {
+      const next = await api.updates.download();
+      if (next.status === "downloaded") notify("The update is ready. Restart TruePOS to finish installing it.");
+      if (next.status === "error") notify(next.message, "error");
+    } catch (error) {
+      notify(friendlyErrorMessage(error, "The TruePOS update could not be downloaded. Check the internet connection and try again."), "error");
+    }
+  };
+
+  const installUpdate = async () => {
+    try {
+      await api.updates.install();
+    } catch (error) {
+      notify(friendlyErrorMessage(error, "The update could not be installed. Restart TruePOS and try again."), "error");
+    }
+  };
+
+  const status = state?.status ?? "idle";
+  const statusLabel = {
+    disabled: "Installed builds only",
+    idle: "Ready to check",
+    checking: "Checking",
+    "up-to-date": "Up to date",
+    available: "Update available",
+    downloading: "Downloading",
+    downloaded: "Ready to install",
+    error: "Check failed"
+  }[status];
+  const currentVersion = state?.currentVersion ?? "...";
+  const updateVisible = status === "available" || status === "downloading" || status === "downloaded";
+
+  return (
+    <div className={`panel software-update-panel update-${status}`}>
+      <div className="screen-heading">
+        <div>
+          <h2>Software Update</h2>
+          <p>TruePOS checks GitHub automatically and installs updates without a manual reinstall</p>
+        </div>
+        <span className={`status-pill ${status === "available" || status === "downloaded" ? "active" : status === "error" ? "inactive" : ""}`}>{statusLabel}</span>
+      </div>
+      <div className="update-version-row">
+        <div><small>Installed version</small><strong>v{currentVersion}</strong></div>
+        {state?.availableVersion && <div><small>Latest version</small><strong>v{state.availableVersion}</strong></div>}
+      </div>
+      <p className="update-message">{state?.message ?? "Loading update information..."}</p>
+      {status === "downloading" && (
+        <div className="update-progress" aria-label={`Update download ${Math.round(state?.percent ?? 0)} percent`}>
+          <span style={{ width: `${state?.percent ?? 0}%` }} />
+        </div>
+      )}
+      {state?.checkedAt && <small className="update-checked">Last checked: {new Date(state.checkedAt).toLocaleString()}</small>}
+      <div className="update-actions">
+        <button className="secondary" type="button" disabled={status === "checking" || status === "downloading" || status === "downloaded" || status === "disabled"} onClick={() => void checkForUpdates()}>
+          <RefreshCw size={16} className={status === "checking" ? "spin" : ""} /> {status === "checking" ? "Checking..." : "Check for Updates"}
+        </button>
+        {updateVisible && status === "available" && (
+          <button className="primary" type="button" onClick={() => void downloadUpdate()}>
+            <Download size={16} /> Update to v{state?.availableVersion}
+          </button>
+        )}
+        {updateVisible && status === "downloading" && (
+          <button className="primary" type="button" disabled>
+            <Download size={16} /> Downloading {Math.round(state?.percent ?? 0)}%
+          </button>
+        )}
+        {updateVisible && status === "downloaded" && (
+          <button className="primary" type="button" onClick={() => void installUpdate()}>
+            <RefreshCw size={16} /> Restart and Update
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function SettingsScreen({ user, notify, updateState, onFactoryReset }: { user: User; notify: Notify; updateState: AppUpdateState | null; onFactoryReset: () => void }) {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [printers, setPrinters] = useState<string[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
@@ -2470,7 +2590,7 @@ function SettingsScreen({ user, notify, onFactoryReset }: { user: User; notify: 
       <div className="settings-title panel">
         <div>
           <h2>Settings</h2>
-          <p>Printer mapping, receipt branding, barcode labels, and local database backup</p>
+          <p>Software updates, printer mapping, receipt branding, barcode labels, and local database backup</p>
         </div>
         <button className="primary" disabled={user.role !== "admin"} onClick={save}>
           <Settings size={16} /> Save Settings
@@ -2479,6 +2599,7 @@ function SettingsScreen({ user, notify, onFactoryReset }: { user: User; notify: 
 
       <div className="settings-layout">
         <div className="settings-editor">
+          <SoftwareUpdatePanel state={updateState} notify={notify} />
           <div className="panel form-grid">
             <div className="screen-heading">
               <div>

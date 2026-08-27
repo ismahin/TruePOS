@@ -60,6 +60,17 @@ const api: TruePOSApi = {
     disconnectGoogleDrive: () => invoke("backup:disconnectGoogleDrive"),
     backupGoogleDriveNow: () => invoke("backup:backupGoogleDriveNow"),
     factoryReset: () => invoke("backup:factoryReset")
+  },
+  updates: {
+    getState: () => invoke("updates:getState"),
+    check: () => invoke("updates:check"),
+    download: () => invoke("updates:download"),
+    install: () => invoke("updates:install"),
+    onStateChanged: (listener) => {
+      const handler = (_event: Electron.IpcRendererEvent, state: Parameters<typeof listener>[0]) => listener(state);
+      ipcRenderer.on("updates:stateChanged", handler);
+      return () => ipcRenderer.removeListener("updates:stateChanged", handler);
+    }
   }
 };
 
