@@ -54,7 +54,7 @@ function registerIpc() {
   ipcMain.handle("inventory:listMovements", (_event, productId) => services.listMovements(productId));
   ipcMain.handle("inventory:getStock", (_event, productId) => services.getStock(productId));
 
-  ipcMain.handle("sales:createSale", (_event, lines, payment) => services.createSale(lines, payment));
+  ipcMain.handle("sales:createAndPrintSale", (_event, lines, payment) => services.createAndPrintSale(assertWindow(), lines, payment));
   ipcMain.handle("sales:returnSale", (_event, saleId) => services.returnSale(saleId));
   ipcMain.handle("sales:cancelSale", (_event, saleId) => services.cancelSale(saleId));
   ipcMain.handle("sales:previewReceipt", (_event, lines, payment) => services.previewReceipt(lines, payment));

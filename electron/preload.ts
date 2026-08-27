@@ -26,7 +26,7 @@ const api: TruePOSApi = {
     getStock: (productId) => invoke("inventory:getStock", productId)
   },
   sales: {
-    createSale: (lines, payment) => invoke("sales:createSale", lines, payment),
+    createAndPrintSale: (lines, payment) => invoke("sales:createAndPrintSale", lines, payment),
     returnSale: (saleId) => invoke("sales:returnSale", saleId),
     cancelSale: (saleId) => invoke("sales:cancelSale", saleId),
     previewReceipt: (lines, payment) => invoke("sales:previewReceipt", lines, payment),

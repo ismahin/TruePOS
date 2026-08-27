@@ -660,14 +660,16 @@ function Billing({ notify }: { notify: Notify }) {
   };
 
   const completeSale = async () => {
-    const sale = await api.sales.createSale(cart, { method: "cash", amount: paid });
-    setReceipt(await api.sales.getReceipt(sale.id));
-    setCart([]);
-    setPaid(0);
-    notify(`Sale completed: ${sale.receiptNo}`);
-    await api.printing.printReceipt(sale.id).catch((err) =>
-      notify(friendlyErrorMessage(err, "The sale was saved, but the receipt could not be printed. Check the printer and try reprinting."), "error")
-    );
+    try {
+      const sale = await api.sales.createAndPrintSale(cart, { method: "cash", amount: paid });
+      setReceipt(await api.sales.getReceipt(sale.id));
+      setCart([]);
+      setPaid(0);
+      notify(`Sale completed: ${sale.receiptNo}`);
+    } catch (err) {
+      const detail = friendlyErrorMessage(err, "Check that the receipt printer is connected, powered on, and ready.");
+      notify(`The receipt was not printed, so the sale was not recorded. ${detail}`, "error");
+    }
   };
 
   return (
@@ -829,21 +831,16 @@ function EnhancedBilling({ notify }: { notify: Notify }) {
     if (busy || cart.length === 0) return;
     setBusy(true);
     try {
-      const sale = await api.sales.createSale(cart, { method: paymentMethod, amount: tendered });
+      const sale = await api.sales.createAndPrintSale(cart, { method: paymentMethod, amount: tendered });
       setCart([]);
       setPaid(0);
       setInvoicePreview("");
       setLastSaleId(sale.id);
       setLastReceiptNo(sale.receiptNo);
-      try {
-        await api.printing.printReceipt(sale.id);
-        notify(`Sale completed: ${sale.receiptNo}`);
-      } catch (err) {
-        const detail = friendlyErrorMessage(err, "Check that the XP-365B is connected, powered on, and in receipt mode.");
-        notify(`Sale ${sale.receiptNo} was saved, but the receipt could not be printed. ${detail}`, "error");
-      }
+      notify(`Sale completed: ${sale.receiptNo}`);
     } catch (err) {
-      notify(friendlyErrorMessage(err, "The sale could not be completed. Check the cart and payment, then try again."), "error");
+      const detail = friendlyErrorMessage(err, "Check that the receipt printer is connected, powered on, and ready.");
+      notify(`The receipt was not printed, so the sale was not recorded. ${detail}`, "error");
     } finally {
       setBusy(false);
       scanInputRef.current?.focus();
@@ -1333,6 +1330,11 @@ function Products({ user, notify }: { user: User; notify: Notify }) {
         <Metric label="Low stock" value={String(metrics.lowStock)} />
         <Metric label="Retail value" value={formatBdt(metrics.retailValue)} />
       </div>
+      <div className="product-primary-action">
+        <button type="button" className="primary compact" onClick={openNewProduct} disabled={user.role !== "admin"}>
+          <Plus size={17} /> Add New Product
+        </button>
+      </div>
       <div className="product-management-grid">
       {productModalOpen && (
       <div className="modal-backdrop product-modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="product-modal-title">
@@ -1417,9 +1419,6 @@ function Products({ user, notify }: { user: User; notify: Notify }) {
             <h2>Stock Entry</h2>
             <p>Scan/select one product, enter received quantity, then print labels if needed</p>
           </div>
-          <button type="button" className="primary compact" onClick={openNewProduct} disabled={user.role !== "admin"}>
-            <Plus size={17} /> Add New Product
-          </button>
         </div>
         {user.role !== "admin" && <div className="notice">Admin permission is required to receive stock.</div>}
         <label>

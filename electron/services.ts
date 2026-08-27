@@ -26,6 +26,7 @@ import { buildReceiptHtml, buildReceiptText, calculateTotals, money, validateCod
 import { makeReceiptBitmapMonochrome, XP365B_SAFE_RECEIPT_WIDTH_DOTS, validateLabelQuantity } from "../src/shared/xprinter.js";
 
 type Row = Record<string, unknown>;
+type PreparedSale = Omit<Sale, "lines"> & { lines: Array<CartLine & { unitCost: number }> };
 
 const serviceName = "TruePOS";
 const dbPasswordAccount = "local-database-key";
@@ -618,11 +619,18 @@ export class TruePOSServices {
     return Number(this.db.prepare("SELECT stock FROM products WHERE id = ?").get<Row>(productId)?.stock ?? 0);
   }
 
-  async createSale(lines: CartLine[], payment: SalePayment) {
+  async createAndPrintSale(window: BrowserWindowType, lines: CartLine[], payment: SalePayment) {
+    const sale = this.prepareSale(lines, payment);
+    await this.printSale(window, sale);
+    this.persistSale(sale);
+    return sale;
+  }
+
+  private prepareSale(lines: CartLine[], payment: SalePayment) {
     const user = this.requireUser();
     const validated = this.validateSaleInput(lines, payment);
     const totals = calculateTotals(validated.lines);
-    const sale: Sale = {
+    return {
       id: uuid(),
       receiptNo: `TP-${Date.now()}-${uuid().slice(0, 4).toUpperCase()}`,
       lines: validated.lines,
@@ -632,7 +640,10 @@ export class TruePOSServices {
       cashierName: user.username,
       status: "completed",
       createdAt: now()
-    };
+    } satisfies PreparedSale;
+  }
+
+  private persistSale(sale: PreparedSale) {
     const tx = this.db.transaction(() => {
       for (const line of sale.lines) {
         const product = this.db.prepare("SELECT stock FROM products WHERE id = ?").get<Row>(line.productId);
@@ -651,17 +662,17 @@ export class TruePOSServices {
           sale.receiptNo,
           sale.payment.method,
           sale.payment.amount,
-          totals.subtotal,
-          totals.discountTotal,
-          totals.taxableTotal,
-          totals.vatTotal,
-          totals.grandTotal,
+          sale.totals.subtotal,
+          sale.totals.discountTotal,
+          sale.totals.taxableTotal,
+          sale.totals.vatTotal,
+          sale.totals.grandTotal,
           sale.cashierId,
           sale.cashierName,
           sale.status,
           sale.createdAt
         );
-      for (const line of validated.lines) {
+      for (const line of sale.lines) {
         this.db
           .prepare(
             `INSERT INTO sale_lines
@@ -674,7 +685,6 @@ export class TruePOSServices {
       }
     });
     tx();
-    return sale;
   }
 
   async returnSale(saleId: string) {
@@ -849,8 +859,12 @@ export class TruePOSServices {
   }
 
   async printReceipt(window: BrowserWindowType, saleId?: string) {
-    const settings = await this.getSettings();
     const sale = saleId ? this.getSale(saleId) : this.sampleSale();
+    await this.printSale(window, sale);
+  }
+
+  private async printSale(window: BrowserWindowType, sale: Sale) {
+    const settings = await this.getSettings();
     if (settings.printerMode === "xprinter") {
       if (settings.receipt.widthMm !== 80) throw new Error("XP-365B SDK receipt mode requires the 80mm paper setting.");
       const imagePath = await this.renderXprinterReceipt(buildReceiptHtml(sale, settings, { widthPx: XP365B_SAFE_RECEIPT_WIDTH_DOTS, thermal: true }));

@@ -698,6 +698,11 @@ th {
   gap: 12px;
 }
 
+.product-primary-action {
+  display: flex;
+  justify-content: flex-start;
+}
+
 .product-form {
   display: grid;
   gap: 14px;
