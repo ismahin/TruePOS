@@ -64,12 +64,12 @@ release/
 The latest local installer from this development build is:
 
 ```text
-release/TruePOS Setup 0.1.23.exe
+release/TruePOS Setup 0.1.24.exe
 ```
 
 The NSIS installer is configured for per-machine installation, so it installs into Program Files when elevated, while keeping user data under AppData.
 
-The installer also bundles the signed Seagull Xprinter driver package and starts its official DriverWizard after the TruePOS files are installed. Connect and power on the XP-365B before starting setup, then complete the printer-detection step in DriverWizard.
+The installer also bundles the signed Seagull Xprinter driver package and starts its official DriverWizard after the TruePOS files are installed. Connect and power on the XP-365B before starting setup, then complete the printer-detection step in DriverWizard. Live driver-installation details are displayed in the installer and saved to `installation.log` inside the TruePOS installation directory.
 
 ## Google Drive Backup
 
