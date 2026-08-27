@@ -9,7 +9,8 @@ The app is developed with Electron, React, TypeScript, and encrypted SQLite.
 - Fast billing screen with barcode scanner friendly checkout
 - Cart quantity editing, discounts, VAT, tender amount, change due, hold and void workflow
 - Receipt preview before print
-- POS thermal receipt printing through Windows printers
+- Native Xprinter XP-365B USB printing for 80mm receipts and 45x35mm Code128 labels
+- Windows-driver printing fallback for other printers
 - Product management with SKU, barcode, category, unit, cost, price, VAT, status, and low stock threshold
 - Separate stock entry workflow for receiving inventory without rescanning every unit
 - Inventory stock in, stock out, adjustment, cycle count, low stock alerts, and movement history
@@ -33,14 +34,24 @@ TruePOS is designed for shops where internet access cannot be guaranteed.
 
 ## Hardware Support
 
-TruePOS targets common retail hardware:
+TruePOS targets the following retail hardware:
 
 - USB barcode scanners in keyboard-wedge mode
-- 58mm and 80mm POS thermal receipt printers
-- Windows-driver thermal printers
-- Barcode label printers or thermal printers configured with label size
+- Xprinter XP-365B over USB using Xprinter's Windows SDK (80mm receipt roll or 45x35mm gap labels)
+- 58mm and 80mm Windows-driver thermal printers as a fallback
+- Other Windows-driver label printers configured with the correct page size
 
 Barcode scanners normally work without a special driver because they type the scanned code into the focused field.
+
+### XP-365B setup
+
+1. Connect the XP-365B by USB, turn it on, and close any other utility that has the printer port open.
+2. In **Settings**, select **Xprinter XP-365B SDK (USB)**. This fixes receipt paper to 80mm and label media to 45x35mm.
+3. Save settings before running either test button.
+4. For receipts, load the 80mm roll and run **Test Receipt Print**.
+5. For labels, load the 45x35mm gap-label roll, run **Calibrate Label Gap** once after loading or changing media, and then run **Print Test Labels**.
+
+SDK mode communicates directly with the USB printer and does not use the Windows printer queue or its page-scaling settings. The official `printer.sdk.dll` runtimes are included from Xprinter Windows SDK 2.0.4; provenance and hashes are recorded in `vendor/xprinter/README.md`. Confirm Xprinter's redistribution terms before publishing the installer outside your organization.
 
 ## Installer
 
@@ -53,10 +64,12 @@ release/
 The latest local installer from this development build is:
 
 ```text
-release/TruePOS Setup 0.1.19.exe
+release/TruePOS Setup 0.1.23.exe
 ```
 
 The NSIS installer is configured for per-machine installation, so it installs into Program Files when elevated, while keeping user data under AppData.
+
+The installer also bundles the signed Seagull Xprinter driver package and starts its official DriverWizard after the TruePOS files are installed. Connect and power on the XP-365B before starting setup, then complete the printer-detection step in DriverWizard.
 
 ## Google Drive Backup
 
@@ -147,4 +160,3 @@ release/               Generated Windows installers
 ## Current Status
 
 TruePOS is under active development. The current build includes the main desktop POS workflows and Windows installer packaging. Before live store deployment, test with the exact printer, barcode scanner, label size, tax settings, and backup workflow used by the shop.
-

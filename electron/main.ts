@@ -39,7 +39,7 @@ function registerIpc() {
   ipcMain.handle("auth:getCurrentUser", () => services.getCurrentUser());
   ipcMain.handle("auth:isSetupRequired", () => services.isSetupRequired());
   ipcMain.handle("auth:setupInitialAdmin", (_event, username: string, password: string, cashier) => services.setupInitialAdmin(username, password, cashier));
-  ipcMain.handle("auth:resetLoginCredentials", (_event, admin, cashier) => services.resetLoginCredentials(admin, cashier));
+  ipcMain.handle("auth:resetLoginCredentials", (_event, currentAdmin, admin, cashier) => services.resetLoginCredentials(currentAdmin, admin, cashier));
 
   ipcMain.handle("products:create", (_event, input) => services.createProduct(input));
   ipcMain.handle("products:update", (_event, id, input) => services.updateProduct(id, input));
@@ -56,9 +56,12 @@ function registerIpc() {
   ipcMain.handle("sales:returnSale", (_event, saleId) => services.returnSale(saleId));
   ipcMain.handle("sales:cancelSale", (_event, saleId) => services.cancelSale(saleId));
   ipcMain.handle("sales:previewReceipt", (_event, lines, payment) => services.previewReceipt(lines, payment));
+  ipcMain.handle("sales:searchReceipts", (_event, receiptNumber) => services.searchReceipts(receiptNumber));
+  ipcMain.handle("sales:previewSavedReceipt", (_event, saleId) => services.previewSavedReceipt(saleId));
   ipcMain.handle("sales:getReceipt", (_event, saleId) => services.getReceipt(saleId));
 
   ipcMain.handle("reports:getDailySales", (_event, date) => services.getDailySales(date));
+  ipcMain.handle("reports:getSalesSummary", (_event, dateFrom, dateTo) => services.getSalesSummary(dateFrom, dateTo));
   ipcMain.handle("reports:getProductSales", (_event, dateFrom, dateTo) => services.getProductSales(dateFrom, dateTo));
   ipcMain.handle("reports:getInventoryValue", () => services.getInventoryValue());
 
@@ -67,6 +70,7 @@ function registerIpc() {
   ipcMain.handle("printing:printReceipt", (_event, saleId) => services.printReceipt(assertWindow(), saleId));
   ipcMain.handle("printing:testBarcode", (_event, productId) => services.printBarcode(assertWindow(), productId, 1));
   ipcMain.handle("printing:printBarcode", (_event, productId, quantity) => services.printBarcode(assertWindow(), productId, quantity));
+  ipcMain.handle("printing:calibrateLabels", () => services.calibrateLabels());
 
   ipcMain.handle("settings:get", () => services.getSettings());
   ipcMain.handle("settings:update", (_event, settings) => services.updateSettings(settings));

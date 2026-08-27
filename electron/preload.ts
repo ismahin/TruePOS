@@ -10,7 +10,7 @@ const api: TruePOSApi = {
     getCurrentUser: () => invoke("auth:getCurrentUser"),
     isSetupRequired: () => invoke("auth:isSetupRequired"),
     setupInitialAdmin: (username, password, cashier) => invoke("auth:setupInitialAdmin", username, password, cashier),
-    resetLoginCredentials: (admin, cashier) => invoke("auth:resetLoginCredentials", admin, cashier)
+    resetLoginCredentials: (currentAdmin, admin, cashier) => invoke("auth:resetLoginCredentials", currentAdmin, admin, cashier)
   },
   products: {
     create: (input) => invoke("products:create", input),
@@ -30,10 +30,13 @@ const api: TruePOSApi = {
     returnSale: (saleId) => invoke("sales:returnSale", saleId),
     cancelSale: (saleId) => invoke("sales:cancelSale", saleId),
     previewReceipt: (lines, payment) => invoke("sales:previewReceipt", lines, payment),
+    searchReceipts: (receiptNumber) => invoke("sales:searchReceipts", receiptNumber),
+    previewSavedReceipt: (saleId) => invoke("sales:previewSavedReceipt", saleId),
     getReceipt: (saleId) => invoke("sales:getReceipt", saleId)
   },
   reports: {
     getDailySales: (date) => invoke("reports:getDailySales", date),
+    getSalesSummary: (dateFrom, dateTo) => invoke("reports:getSalesSummary", dateFrom, dateTo),
     getProductSales: (dateFrom, dateTo) => invoke("reports:getProductSales", dateFrom, dateTo),
     getInventoryValue: () => invoke("reports:getInventoryValue")
   },
@@ -42,7 +45,8 @@ const api: TruePOSApi = {
     testReceipt: () => invoke("printing:testReceipt"),
     printReceipt: (saleId) => invoke("printing:printReceipt", saleId),
     testBarcode: (productId) => invoke("printing:testBarcode", productId),
-    printBarcode: (productId, quantity) => invoke("printing:printBarcode", productId, quantity)
+    printBarcode: (productId, quantity) => invoke("printing:printBarcode", productId, quantity),
+    calibrateLabels: () => invoke("printing:calibrateLabels")
   },
   settings: {
     get: () => invoke("settings:get"),

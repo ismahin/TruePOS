@@ -95,6 +95,10 @@ export type BarcodeSettings = {
   labelWidthMm: number;
   labelHeightMm: number;
   padding: number;
+  printSpeed: number;
+  density: number;
+  gapMm: number;
+  offsetMm: number;
   showName: boolean;
   showPrice: boolean;
 };
@@ -113,7 +117,7 @@ export type AppSettings = {
   currency: "BDT";
   receiptPrinter: string;
   barcodePrinter: string;
-  printerMode: "windows" | "escpos";
+  printerMode: "windows" | "xprinter";
   receipt: ReceiptSettings;
   barcode: BarcodeSettings;
   googleDrive: GoogleDriveBackupSettings;
@@ -151,7 +155,7 @@ export type AuthApi = {
   getCurrentUser(): Promise<User | null>;
   isSetupRequired(): Promise<boolean>;
   setupInitialAdmin(username: string, password: string, cashier?: { username: string; password: string }): Promise<User>;
-  resetLoginCredentials(admin: { username: string; password: string }, cashier?: { username: string; password: string }): Promise<{ adminUsername: string; cashierUsername: string }>;
+  resetLoginCredentials(currentAdmin: { username: string; password: string }, admin: { username: string; password: string }, cashier?: { username: string; password: string }): Promise<{ adminUsername: string; cashierUsername: string }>;
 };
 
 export type ProductApi = {
@@ -174,11 +178,14 @@ export type SalesApi = {
   returnSale(saleId: string): Promise<Sale>;
   cancelSale(saleId: string): Promise<Sale>;
   previewReceipt(lines: CartLine[], payment: SalePayment): Promise<string>;
+  searchReceipts(receiptNumber: string): Promise<Sale[]>;
+  previewSavedReceipt(saleId: string): Promise<string>;
   getReceipt(saleId: string): Promise<string>;
 };
 
 export type ReportsApi = {
   getDailySales(date: string): Promise<SalesReport>;
+  getSalesSummary(dateFrom: string, dateTo: string): Promise<SalesReport>;
   getProductSales(dateFrom: string, dateTo: string): Promise<ProductSalesReport[]>;
   getInventoryValue(): Promise<InventoryValueReport>;
 };
@@ -189,6 +196,7 @@ export type PrintingApi = {
   printReceipt(saleId: string): Promise<void>;
   testBarcode(productId: string): Promise<void>;
   printBarcode(productId: string, quantity: number): Promise<void>;
+  calibrateLabels(): Promise<void>;
 };
 
 export type SettingsApi = {

@@ -1,10 +1,120 @@
-import { Banknote, BarChart3, Boxes, CreditCard, Edit3, LogOut, Minus, PackagePlus, Pause, Plus, Printer, Receipt, RefreshCw, RotateCcw, Search, Settings, ShoppingCart, Tag, Trash2, Upload } from "lucide-react";
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import type { AppSettings, CartLine, InventoryMovement, InventoryValueReport, Product, ProductInput, ProductSalesReport, SalesReport, User } from "../shared/contracts";
-import { buildReceiptText, calculateTotals, formatBdt } from "../shared/pos";
-import logoUrl from "./assets/truepos-logo-cropped.png";
+import { AlertTriangle, Banknote, BarChart3, Boxes, CreditCard, Edit3, LogOut, Minus, PackagePlus, Pause, Plus, Printer, Receipt, RefreshCw, RotateCcw, Search, Settings, ShoppingCart, Tag, Trash2, Upload, X } from "lucide-react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { AppSettings, CartLine, InventoryMovement, InventoryValueReport, Product, ProductInput, ProductSalesReport, Sale, SalesReport, User } from "../shared/contracts";
+import { buildReceiptHtml, calculatePaymentBalance, calculateTotals, formatBdt } from "../shared/pos";
+import { XP365B_SAFE_RECEIPT_WIDTH_DOTS } from "../shared/xprinter";
+import logoUrl from "./assets/truepos-logo-v4.png";
 
 type Screen = "billing" | "products" | "inventory" | "reports" | "settings";
+type NoticeKind = "success" | "error";
+type Notify = (message: string, kind?: NoticeKind) => void;
+
+function isUserCancellation(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return /\b(cancelled|canceled)\b/i.test(message);
+}
+
+function friendlyErrorMessage(error: unknown, fallback: string) {
+  let message = error instanceof Error ? error.message : typeof error === "string" ? error : fallback;
+
+  // Electron can wrap the same error more than once. Remove every wrapper before
+  // deciding whether the remaining text is safe and useful for a customer.
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const previous = message;
+    message = message
+      .replace(/^Error:\s*/i, "")
+      .replace(/^Error invoking remote method\s+['"][^'"]+['"]:\s*/i, "")
+      .trim();
+    if (message === previous) break;
+  }
+
+  // Stack traces and service responses can span several lines. The first line is
+  // enough to identify a known problem; unknown technical text uses the fallback.
+  message = message.split(/\r?\n/, 1)[0]?.trim() ?? "";
+
+  if (!message) return fallback;
+  if (/UNIQUE constraint failed: products\.barcode|SQLITE_CONSTRAINT.*barcode/i.test(message)) {
+    return "This barcode is already assigned to another product. Enter a different barcode and try again.";
+  }
+  if (/UNIQUE constraint failed: products\.sku|SQLITE_CONSTRAINT.*sku/i.test(message)) {
+    return "This SKU is already assigned to another product. Enter a different SKU and try again.";
+  }
+  if (/UNIQUE constraint failed: users\.username|SQLITE_CONSTRAINT.*username/i.test(message)) {
+    return "That username is already in use. Choose a different username and try again.";
+  }
+  if (/database is locked|SQLITE_BUSY/i.test(message)) {
+    return "TruePOS is busy saving another change. Please wait a moment and try again.";
+  }
+  if (/did not respond in TSPL label mode|Receipt\/ESC-POS mode to Label\/TSPL mode/i.test(message)) {
+    return "The printer is still in receipt mode. Switch the XP-365B to Label mode, then try printing the label again.";
+  }
+  if (/out of labels/i.test(message)) {
+    return "The printer is out of labels. Load a label roll, close the cover, and try again.";
+  }
+  if (/paper jam/i.test(message)) {
+    return "A label is jammed in the printer. Clear the jam, close the cover, and try again.";
+  }
+  if (/print head open|cover open/i.test(message)) {
+    return "The printer cover is open. Close it firmly, then try again.";
+  }
+  if (/out of ribbon/i.test(message)) {
+    return "The printer cannot detect the printing material. Check that the label roll is loaded correctly, then try again.";
+  }
+  if (/printer busy|printing paused/i.test(message)) {
+    return "The printer is busy or paused. Wait until it is ready, then try again.";
+  }
+  if (/XP-365B is not ready|printer error/i.test(message)) {
+    return "The printer is not ready. Check the paper, cover, USB connection, and selected mode, then try again.";
+  }
+  if (/XP-365B USB device not found|could not open the printer port|invalid USB path/i.test(message)) {
+    return "The XP-365B could not be found. Make sure it is powered on and connected by USB, then try again.";
+  }
+  if (/Xprinter .*?(?:write|status read).*?(?:failed|timed out)|Xprinter .*? failed/i.test(message)) {
+    return "The printer could not complete the job. Check the USB connection, paper, cover, and printer mode, then try again.";
+  }
+  if (/Xprinter SDK runtime was not found|printer\.sdk\.dll|SDK does not support|SDK error/i.test(message)) {
+    return "Required Xprinter support files are missing. Reinstall TruePOS, then try printing again.";
+  }
+  if (/Barcode .* is too long for .*scanner-safe|module width/i.test(message)) {
+    return "This barcode is too long for the selected label size. Use a shorter barcode or choose a wider label.";
+  }
+  if (/Google token exchange failed|Google token refresh failed|Google OAuth failed|Invalid Google OAuth state/i.test(message)) {
+    return "Google Drive authorization could not be completed. Disconnect the account, reconnect it, and try again.";
+  }
+  if (/Google Drive upload failed/i.test(message)) {
+    return "The backup could not be uploaded to Google Drive. Check the connection and available Drive storage, then try again.";
+  }
+  if (/EACCES|EPERM|permission denied/i.test(message)) {
+    return "TruePOS does not have permission to access the required file or folder. Choose another location or contact an administrator.";
+  }
+  if (/ENOENT|no such file or directory/i.test(message)) {
+    return "A required file could not be found. Check that it has not been moved or deleted, then try again.";
+  }
+  if (/ENOTFOUND|ECONNREFUSED|ECONNRESET|network request failed|fetch failed/i.test(message)) {
+    return "TruePOS could not connect to the service. Check the internet connection and try again.";
+  }
+
+  const containsTechnicalDetails =
+    /Error invoking remote method|\bIPC\b|SQLITE_|constraint failed|TypeError|ReferenceError|SyntaxError|UnhandledPromise|node:|\.dll\b|\.node\b|\bSDK\b|\berrno\b|\bHTTP\s*\d{3}\b|\bstatus(?: code)?\s*[:=]?\s*\d{3}\b|\b0x[0-9a-f]+\b|\bat\s+\S+\s*\(/i.test(message) ||
+    /[A-Za-z]:\\[^\s]+|\/(?:Users|home|var|tmp)\//i.test(message) ||
+    /<\/?[a-z][^>]*>|^\s*[\[{].*[\]}]\s*$/i.test(message) ||
+    message.length > 180;
+
+  if (containsTechnicalDetails) return fallback;
+  return message;
+}
+
+function errorDialogTitle(message: string) {
+  if (/printer|printing|receipt|label|barcode|XP-365B|TSPL/i.test(message)) return "Printing problem";
+  if (/login|sign in|password|username|credentials/i.test(message)) return "Sign-in problem";
+  if (/backup|Google Drive|CSV|export|import/i.test(message)) return "Backup problem";
+  if (/inventory|stock|quantity/i.test(message)) return "Inventory problem";
+  if (/product|SKU|category/i.test(message)) return "Product problem";
+  if (/report/i.test(message)) return "Report problem";
+  if (/sale|payment|cart|invoice|billing/i.test(message)) return "Billing problem";
+  if (/settings/i.test(message)) return "Settings problem";
+  return "Unable to complete the action";
+}
 
 const api = window.truePOS;
 
@@ -13,6 +123,7 @@ export function App() {
   const [setupRequired, setSetupRequired] = useState<boolean | null>(null);
   const [screen, setScreen] = useState<Screen>("billing");
   const [toast, setToast] = useState("");
+  const [errorDialog, setErrorDialog] = useState<{ title: string; message: string } | null>(null);
 
   useEffect(() => {
     Promise.all([api.auth.isSetupRequired(), api.auth.getCurrentUser()])
@@ -20,29 +131,78 @@ export function App() {
         setSetupRequired(required);
         setUser(currentUser);
       })
-      .catch(() => {
+      .catch((err) => {
         setSetupRequired(false);
         setUser(null);
+        const message = friendlyErrorMessage(err, "TruePOS could not finish starting. Close and reopen the application, then try again.");
+        setErrorDialog({ title: "Startup problem", message });
       });
   }, []);
 
-  const notify = (message: string) => {
+  useEffect(() => {
+    if (!user || screen === "billing") return;
+
+    const blockEnterOutsideBilling = (event: KeyboardEvent) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    };
+
+    window.addEventListener("keydown", blockEnterOutsideBilling, true);
+    return () => window.removeEventListener("keydown", blockEnterOutsideBilling, true);
+  }, [screen, user]);
+
+  const notify: Notify = useCallback((message, kind = "success") => {
+    if (kind === "error") {
+      if (isUserCancellation(message)) return;
+      setToast("");
+      setErrorDialog({ title: errorDialogTitle(message), message });
+      return;
+    }
     setToast(message);
     window.setTimeout(() => setToast(""), 3500);
-  };
+  }, []);
+
+  useEffect(() => {
+    const handleUnexpectedError = (event: ErrorEvent) => {
+      event.preventDefault();
+      const message = friendlyErrorMessage(event.error ?? event.message, "An unexpected error occurred. Please try the action again.");
+      setErrorDialog({ title: "Unexpected problem", message });
+    };
+    const handleUnhandledRejection = (event: PromiseRejectionEvent) => {
+      event.preventDefault();
+      if (isUserCancellation(event.reason)) return;
+      const message = friendlyErrorMessage(event.reason, "The action could not be completed. Please try again.");
+      setErrorDialog({ title: errorDialogTitle(message), message });
+    };
+    window.addEventListener("error", handleUnexpectedError);
+    window.addEventListener("unhandledrejection", handleUnhandledRejection);
+    return () => {
+      window.removeEventListener("error", handleUnexpectedError);
+      window.removeEventListener("unhandledrejection", handleUnhandledRejection);
+    };
+  }, []);
 
   if (setupRequired === null) return null;
   if (setupRequired) {
     return (
-      <FirstRunSetup
-        onComplete={(createdUser) => {
-          setSetupRequired(false);
-          setUser(createdUser);
-        }}
-      />
+      <>
+        <FirstRunSetup
+          onComplete={(createdUser) => {
+            setSetupRequired(false);
+            setUser(createdUser);
+          }}
+        />
+        {errorDialog && <ErrorModal title={errorDialog.title} message={errorDialog.message} onClose={() => setErrorDialog(null)} />}
+      </>
     );
   }
-  if (!user) return <Login onLogin={setUser} />;
+  if (!user) return (
+    <>
+      <Login onLogin={setUser} />
+      {errorDialog && <ErrorModal title={errorDialog.title} message={errorDialog.message} onClose={() => setErrorDialog(null)} />}
+    </>
+  );
 
   return (
     <div className="app-shell">
@@ -76,7 +236,7 @@ export function App() {
         {screen === "billing" && <EnhancedBilling notify={notify} />}
         {screen === "products" && <Products user={user} notify={notify} />}
         {screen === "inventory" && <EnhancedInventory notify={notify} />}
-        {screen === "reports" && <Reports />}
+        {screen === "reports" && <Reports notify={notify} />}
         {screen === "settings" && (
           <SettingsScreen
             user={user}
@@ -90,6 +250,91 @@ export function App() {
         )}
       </main>
       {toast && <div className="toast">{toast}</div>}
+      {errorDialog && <ErrorModal title={errorDialog.title} message={errorDialog.message} onClose={() => setErrorDialog(null)} />}
+    </div>
+  );
+}
+
+function ErrorModal({ title, message, onClose }: { title: string; message: string; onClose: () => void }) {
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    closeButtonRef.current?.focus();
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [onClose]);
+
+  return (
+    <div className="modal-backdrop error-modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="error-modal-title">
+      <div className="error-modal">
+        <div className="error-modal-heading">
+          <div className="error-modal-icon"><AlertTriangle size={24} /></div>
+          <div>
+            <h2 id="error-modal-title">{title}</h2>
+            <p>{message}</p>
+          </div>
+          <button className="icon-button" type="button" onClick={onClose} aria-label="Close error message"><X size={20} /></button>
+        </div>
+        <div className="error-modal-actions">
+          <button ref={closeButtonRef} className="primary" type="button" onClick={onClose}>OK</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ReceiptPreview({ html, title }: { html: string; title: string }) {
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const frameRef = useRef<HTMLIFrameElement>(null);
+  const [paperSize, setPaperSize] = useState({ width: XP365B_SAFE_RECEIPT_WIDTH_DOTS, height: 720 });
+  const [scale, setScale] = useState(1);
+
+  const measurePaper = useCallback(() => {
+    const document = frameRef.current?.contentDocument;
+    if (!document) return;
+    const paper = document.querySelector<HTMLElement>(".receipt") ?? document.body;
+    const bounds = paper.getBoundingClientRect();
+    const width = Math.max(1, Math.ceil(bounds.width));
+    const height = Math.max(1, Math.ceil(Math.max(bounds.height, paper.scrollHeight)));
+    setPaperSize((current) => current.width === width && current.height === height ? current : { width, height });
+  }, []);
+
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    const fitPaper = () => {
+      const availableWidth = Math.max(1, viewport.clientWidth);
+      setScale(Math.min(1, availableWidth / paperSize.width));
+    };
+    fitPaper();
+    const observer = new ResizeObserver(fitPaper);
+    observer.observe(viewport);
+    return () => observer.disconnect();
+  }, [paperSize.width]);
+
+  return (
+    <div ref={viewportRef} className="receipt-preview-viewport">
+      <div
+        className="receipt-preview-paper"
+        style={{ width: paperSize.width * scale, height: paperSize.height * scale }}
+      >
+        <iframe
+          ref={frameRef}
+          className="receipt-preview-document"
+          title={title}
+          sandbox="allow-same-origin"
+          srcDoc={html}
+          onLoad={() => window.requestAnimationFrame(measurePaper)}
+          style={{
+            width: paperSize.width,
+            height: paperSize.height,
+            transform: `scale(${scale})`
+          }}
+        />
+      </div>
     </div>
   );
 }
@@ -107,7 +352,7 @@ function Login({ onLogin }: { onLogin: (user: User) => void }) {
     try {
       onLogin(await api.auth.login(username, password));
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Login failed.");
+      setError(friendlyErrorMessage(err, "Sign in failed. Check the username and password, then try again."));
     }
   }
 
@@ -139,7 +384,6 @@ function Login({ onLogin }: { onLogin: (user: User) => void }) {
           <input value={password} type="password" onChange={(event) => setPassword(event.target.value)} />
         </label>
         {notice && <div className="notice neutral">{notice}</div>}
-        {error && <div className="form-error">{error}</div>}
         <button className="primary" type="submit">
           Login
         </button>
@@ -147,11 +391,14 @@ function Login({ onLogin }: { onLogin: (user: User) => void }) {
           Reset login information
         </button>
       </form>
+      {error && <ErrorModal title="Sign-in problem" message={error} onClose={() => setError("")} />}
     </div>
   );
 }
 
 function ResetLoginInfo({ onCancel, onComplete }: { onCancel: () => void; onComplete: (adminUsername: string) => void }) {
+  const [currentAdminUsername, setCurrentAdminUsername] = useState("admin");
+  const [currentAdminPassword, setCurrentAdminPassword] = useState("");
   const [adminUsername, setAdminUsername] = useState("admin");
   const [adminPassword, setAdminPassword] = useState("");
   const [confirmAdminPassword, setConfirmAdminPassword] = useState("");
@@ -179,12 +426,13 @@ function ResetLoginInfo({ onCancel, onComplete }: { onCancel: () => void; onComp
     }
     try {
       const result = await api.auth.resetLoginCredentials(
+        { username: currentAdminUsername, password: currentAdminPassword },
         { username: adminUsername, password: adminPassword },
         resetCashier ? { username: cashierUsername, password: cashierPassword } : undefined
       );
       onComplete(result.adminUsername);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Login information could not be reset.");
+      setError(friendlyErrorMessage(err, "Login information could not be reset. Check the details and try again."));
     }
   }
 
@@ -193,10 +441,18 @@ function ResetLoginInfo({ onCancel, onComplete }: { onCancel: () => void; onComp
       <form className="login-panel setup-panel" onSubmit={submit}>
         <img className="login-logo" src={logoUrl} alt="TruePOS" />
         <h2>Reset Login Information</h2>
-        <p>This changes only admin and cashier login details. Products, sales, inventory, reports, settings, and backups remain unchanged.</p>
+        <p>Verify the current admin, then choose the new login details. Products, sales, inventory, reports, settings, and backups remain unchanged.</p>
+        <label>
+          Current admin username
+          <input value={currentAdminUsername} onChange={(event) => setCurrentAdminUsername(event.target.value)} autoFocus />
+        </label>
+        <label>
+          Current admin password
+          <input value={currentAdminPassword} type="password" onChange={(event) => setCurrentAdminPassword(event.target.value)} />
+        </label>
         <label>
           New admin username
-          <input value={adminUsername} onChange={(event) => setAdminUsername(event.target.value)} autoFocus />
+          <input value={adminUsername} onChange={(event) => setAdminUsername(event.target.value)} />
         </label>
         <label>
           New admin password
@@ -230,7 +486,6 @@ function ResetLoginInfo({ onCancel, onComplete }: { onCancel: () => void; onComp
           <input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} />
           I understand this only changes login information
         </label>
-        {error && <div className="form-error">{error}</div>}
         <button className="primary" type="submit">
           Save Login Information
         </button>
@@ -238,6 +493,7 @@ function ResetLoginInfo({ onCancel, onComplete }: { onCancel: () => void; onComp
           Back to Login
         </button>
       </form>
+      {error && <ErrorModal title="Login reset problem" message={error} onClose={() => setError("")} />}
     </div>
   );
 }
@@ -272,7 +528,7 @@ function FirstRunSetup({ onComplete }: { onComplete: (user: User) => void }) {
         )
       );
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Setup failed.");
+      setError(friendlyErrorMessage(err, "Setup could not be completed. Check the information and try again."));
     }
   }
 
@@ -314,11 +570,11 @@ function FirstRunSetup({ onComplete }: { onComplete: (user: User) => void }) {
             </label>
           </div>
         )}
-        {error && <div className="form-error">{error}</div>}
         <button className="primary" type="submit">
           Start TruePOS
         </button>
       </form>
+      {error && <ErrorModal title="Setup problem" message={error} onClose={() => setError("")} />}
     </div>
   );
 }
@@ -332,7 +588,7 @@ function NavButton(props: { active: boolean; icon: React.ReactNode; label: strin
   );
 }
 
-function Billing({ notify }: { notify: (message: string) => void }) {
+function Billing({ notify }: { notify: Notify }) {
   const [query, setQuery] = useState("");
   const [products, setProducts] = useState<Product[]>([]);
   const [cart, setCart] = useState<CartLine[]>([]);
@@ -341,8 +597,8 @@ function Billing({ notify }: { notify: (message: string) => void }) {
   const totals = useMemo(() => calculateTotals(cart), [cart]);
 
   useEffect(() => {
-    api.products.search(query).then(setProducts).catch(console.error);
-  }, [query]);
+    api.products.search(query).then(setProducts).catch((err) => notify(friendlyErrorMessage(err, "Products could not be loaded. Please try again."), "error"));
+  }, [query, notify]);
 
   const addProduct = (product: Product) => {
     setCart((current) => {
@@ -372,12 +628,14 @@ function Billing({ notify }: { notify: (message: string) => void }) {
   };
 
   const completeSale = async () => {
-    const sale = await api.sales.createSale(cart, { method: "cash", amount: paid || totals.grandTotal });
+    const sale = await api.sales.createSale(cart, { method: "cash", amount: paid });
     setReceipt(await api.sales.getReceipt(sale.id));
     setCart([]);
     setPaid(0);
     notify(`Sale completed: ${sale.receiptNo}`);
-    await api.printing.printReceipt(sale.id).catch(() => notify("Sale saved, but printing failed."));
+    await api.printing.printReceipt(sale.id).catch((err) =>
+      notify(friendlyErrorMessage(err, "The sale was saved, but the receipt could not be printed. Check the printer and try reprinting."), "error")
+    );
   };
 
   return (
@@ -458,7 +716,7 @@ type HeldCart = {
 
 const heldCartStorageKey = "truepos.heldCarts";
 
-function EnhancedBilling({ notify }: { notify: (message: string) => void }) {
+function EnhancedBilling({ notify }: { notify: Notify }) {
   const [query, setQuery] = useState("");
   const [products, setProducts] = useState<Product[]>([]);
   const [cart, setCart] = useState<CartLine[]>([]);
@@ -477,21 +735,29 @@ function EnhancedBilling({ notify }: { notify: (message: string) => void }) {
   const priceCheckProduct = hasQuery ? exactProduct ?? products[0] : undefined;
   const resultProducts = priceCheckProduct ? products.filter((product) => product.id !== priceCheckProduct.id) : products;
   const itemCount = cart.reduce((sum, line) => sum + line.quantity, 0);
-  const tendered = paid || totals.grandTotal;
-  const changeDue = Math.max(0, tendered - totals.grandTotal);
-  const paymentReady = paymentMethod !== "cash" || tendered >= totals.grandTotal;
+  const tendered = Number.isFinite(paid) ? Math.max(0, paid) : 0;
+  const paymentBalance = calculatePaymentBalance(totals.grandTotal, tendered);
 
   useEffect(() => {
     if (!hasQuery) {
       setProducts([]);
       return;
     }
-    api.products.search(trimmedQuery).then(setProducts).catch(console.error);
-  }, [hasQuery, trimmedQuery]);
+    api.products.search(trimmedQuery).then(setProducts).catch((err) =>
+      notify(friendlyErrorMessage(err, "Products could not be searched. Please try again."), "error")
+    );
+  }, [hasQuery, trimmedQuery, notify]);
 
   useEffect(() => {
     const stored = window.localStorage.getItem(heldCartStorageKey);
-    if (stored) setHeldCarts(JSON.parse(stored) as HeldCart[]);
+    if (!stored) return;
+    try {
+      const parsed = JSON.parse(stored) as unknown;
+      if (Array.isArray(parsed)) setHeldCarts(parsed as HeldCart[]);
+      else window.localStorage.removeItem(heldCartStorageKey);
+    } catch {
+      window.localStorage.removeItem(heldCartStorageKey);
+    }
   }, []);
 
   useEffect(() => {
@@ -500,7 +766,7 @@ function EnhancedBilling({ notify }: { notify: (message: string) => void }) {
 
   const holdCart = () => {
     if (cart.length === 0) {
-      notify("Cart is empty.");
+      notify("The cart is empty. Add a product before holding the sale.", "error");
       return;
     }
     const held: HeldCart = {
@@ -517,15 +783,11 @@ function EnhancedBilling({ notify }: { notify: (message: string) => void }) {
 
   const openInvoicePreview = async () => {
     if (busy || cart.length === 0) return;
-    if (!paymentReady) {
-      notify("Paid amount is below the bill total.");
-      return;
-    }
     setBusy(true);
     try {
       setInvoicePreview(await api.sales.previewReceipt(cart, { method: paymentMethod, amount: tendered }));
     } catch (err) {
-      notify(err instanceof Error ? err.message : "Could not prepare invoice preview.");
+      notify(friendlyErrorMessage(err, "The invoice preview could not be prepared. Please try again."), "error");
     } finally {
       setBusy(false);
     }
@@ -536,20 +798,20 @@ function EnhancedBilling({ notify }: { notify: (message: string) => void }) {
     setBusy(true);
     try {
       const sale = await api.sales.createSale(cart, { method: paymentMethod, amount: tendered });
+      setCart([]);
+      setPaid(0);
+      setInvoicePreview("");
+      setLastSaleId(sale.id);
+      setLastReceiptNo(sale.receiptNo);
       try {
         await api.printing.printReceipt(sale.id);
-        setCart([]);
-        setPaid(0);
-        setInvoicePreview("");
-        setLastSaleId(sale.id);
-        setLastReceiptNo(sale.receiptNo);
         notify(`Sale completed: ${sale.receiptNo}`);
-      } catch {
-        await api.sales.cancelSale(sale.id);
-        notify("Print cancelled. Sale was not completed.");
+      } catch (err) {
+        const detail = friendlyErrorMessage(err, "Check that the XP-365B is connected, powered on, and in receipt mode.");
+        notify(`Sale ${sale.receiptNo} was saved, but the receipt could not be printed. ${detail}`, "error");
       }
     } catch (err) {
-      notify(err instanceof Error ? err.message : "Sale could not be completed.");
+      notify(friendlyErrorMessage(err, "The sale could not be completed. Check the cart and payment, then try again."), "error");
     } finally {
       setBusy(false);
       scanInputRef.current?.focus();
@@ -577,14 +839,14 @@ function EnhancedBilling({ notify }: { notify: (message: string) => void }) {
 
   const addProduct = (product: Product) => {
     if (product.stock <= 0) {
-      notify(`${product.name} is out of stock.`);
+      notify(`${product.name} is out of stock and cannot be added to the cart.`, "error");
       return;
     }
     setCart((current) => {
       const existing = current.find((line) => line.productId === product.id);
       if (existing) {
         if (existing.quantity + 1 > product.stock) {
-          notify(`Only ${product.stock} available for ${product.name}.`);
+          notify(`Only ${product.stock} ${product.unit} of ${product.name} are available. Reduce the quantity and try again.`, "error");
           return current;
         }
         return current.map((line) => (line.productId === product.id ? { ...line, quantity: line.quantity + 1 } : line));
@@ -610,14 +872,14 @@ function EnhancedBilling({ notify }: { notify: (message: string) => void }) {
   const scanOrSearch = async (event: FormEvent) => {
     event.preventDefault();
     if (!trimmedQuery) {
-      notify("Scan a barcode or type a product name first.");
+      notify("Scan a barcode or type a product name before adding an item.", "error");
       scanInputRef.current?.focus();
       return;
     }
     const searched = await api.products.search(trimmedQuery);
     const match = searched.find((product) => product.barcode === trimmedQuery || product.sku === trimmedQuery) ?? searched[0];
     if (match) addProduct(match);
-    else notify("No product found for this barcode or search.");
+    else notify("No product matches that barcode or search. Check the value and try again.", "error");
   };
 
   const updateLine = (productId: string, patch: Partial<CartLine>) => {
@@ -637,7 +899,7 @@ function EnhancedBilling({ notify }: { notify: (message: string) => void }) {
 
   const resumeCart = (held: HeldCart) => {
     if (cart.length > 0) {
-      notify("Void or hold the current cart before resuming another sale.");
+      notify("The current cart is not empty. Hold or void it before resuming another sale.", "error");
       return;
     }
     setCart(held.lines);
@@ -773,17 +1035,17 @@ function EnhancedBilling({ notify }: { notify: (message: string) => void }) {
             <button onClick={() => setPaid(0)}><RotateCcw size={15} /> Reset</button>
           </div>
           <div className="change-due">
-            <span>Change due</span>
-            <strong>{formatBdt(changeDue)}</strong>
+            <span>{paymentBalance.due > 0 ? "Balance due" : "Change due"}</span>
+            <strong>{formatBdt(paymentBalance.due > 0 ? paymentBalance.due : paymentBalance.change)}</strong>
           </div>
         </div>
-        <button className="primary wide" disabled={busy || cart.length === 0 || !paymentReady} onClick={openInvoicePreview}>
+        <button className="primary wide" disabled={busy || cart.length === 0} onClick={openInvoicePreview}>
           <Receipt size={16} /> Complete
         </button>
         {lastSaleId && cart.length === 0 && (
           <div className="last-sale">
             <span>Last sale {lastReceiptNo} saved.</span>
-            <button className="secondary compact" onClick={() => api.printing.printReceipt(lastSaleId).catch(() => notify("Could not reprint receipt."))}>
+            <button className="secondary compact" onClick={() => api.printing.printReceipt(lastSaleId).catch((err) => notify(friendlyErrorMessage(err, "The receipt could not be reprinted. Check the printer and try again."), "error"))}>
               <Printer size={15} /> Reprint
             </button>
           </div>
@@ -795,11 +1057,13 @@ function EnhancedBilling({ notify }: { notify: (message: string) => void }) {
             <div className="modal-heading">
               <div>
                 <h2>Invoice Preview</h2>
-                <p>Review the bill before printing</p>
+                <p>This is the same layout that will be sent to the receipt printer</p>
               </div>
-              <button className="ghost icon-only" onClick={() => setInvoicePreview("")}>x</button>
+              <button className="icon-button" type="button" onClick={() => setInvoicePreview("")} aria-label="Close invoice preview"><X size={20} /></button>
             </div>
-            <pre className="invoice-preview">{invoicePreview}</pre>
+            <div className="invoice-preview-area">
+              <ReceiptPreview html={invoicePreview} title="Invoice print preview" />
+            </div>
             <div className="modal-actions">
               <button className="secondary" onClick={() => setInvoicePreview("")} disabled={busy}>
                 Cancel
@@ -829,14 +1093,19 @@ const emptyProductForm: ProductInput = {
   isActive: true
 };
 
-function Products({ user, notify }: { user: User; notify: (message: string) => void }) {
+function Products({ user, notify }: { user: User; notify: Notify }) {
   const [products, setProducts] = useState<Product[]>([]);
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState("");
   const [includeInactive, setIncludeInactive] = useState(false);
   const [lowStockOnly, setLowStockOnly] = useState(false);
+  const [dateFilterField, setDateFilterField] = useState<"createdAt" | "updatedAt">("updatedAt");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+  const [productPage, setProductPage] = useState(1);
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
   const [form, setForm] = useState<ProductInput>(emptyProductForm);
+  const [productModalOpen, setProductModalOpen] = useState(false);
   const [stockQuery, setStockQuery] = useState("");
   const [stockMatches, setStockMatches] = useState<Product[]>([]);
   const [stockProductId, setStockProductId] = useState("");
@@ -844,12 +1113,26 @@ function Products({ user, notify }: { user: User; notify: (message: string) => v
   const [receiveNote, setReceiveNote] = useState("");
   const [labelQty, setLabelQty] = useState(1);
   const categories = Array.from(new Set(products.map((product) => product.category).filter(Boolean))).sort();
+  const invalidDateRange = Boolean(dateFrom && dateTo && dateFrom > dateTo);
+  const datedProducts = useMemo(() => {
+    if (invalidDateRange) return [];
+    const from = dateFrom ? new Date(`${dateFrom}T00:00:00`).getTime() : Number.NEGATIVE_INFINITY;
+    const to = dateTo ? new Date(`${dateTo}T23:59:59.999`).getTime() : Number.POSITIVE_INFINITY;
+    return products.filter((product) => {
+      const timestamp = new Date(product[dateFilterField]).getTime();
+      return Number.isFinite(timestamp) && timestamp >= from && timestamp <= to;
+    });
+  }, [products, dateFilterField, dateFrom, dateTo, invalidDateRange]);
+  const productsPerPage = 20;
+  const totalProductPages = Math.max(1, Math.ceil(datedProducts.length / productsPerPage));
+  const pageStart = (productPage - 1) * productsPerPage;
+  const pagedProducts = datedProducts.slice(pageStart, pageStart + productsPerPage);
   const selectedStockProduct = stockMatches.find((product) => product.id === stockProductId);
   const metrics = {
-    total: products.length,
-    active: products.filter((product) => product.isActive).length,
-    lowStock: products.filter((product) => product.stock <= product.lowStockThreshold).length,
-    retailValue: products.reduce((sum, product) => sum + product.stock * product.price, 0)
+    total: datedProducts.length,
+    active: datedProducts.filter((product) => product.isActive).length,
+    lowStock: datedProducts.filter((product) => product.stock <= product.lowStockThreshold).length,
+    retailValue: datedProducts.reduce((sum, product) => sum + product.stock * product.price, 0)
   };
   const margin = form.price > 0 ? ((form.price - form.cost) / form.price) * 100 : 0;
 
@@ -857,9 +1140,17 @@ function Products({ user, notify }: { user: User; notify: (message: string) => v
     api.products
       .list({ query, includeInactive, lowStockOnly, category })
       .then(setProducts)
-      .catch((err) => notify(err instanceof Error ? err.message : "Could not load products."));
+      .catch((err) => notify(friendlyErrorMessage(err, "Products could not be loaded. Please try again."), "error"));
 
   useEffect(() => void load(), [query, includeInactive, lowStockOnly, category]);
+
+  useEffect(() => {
+    setProductPage(1);
+  }, [query, category, includeInactive, lowStockOnly, dateFilterField, dateFrom, dateTo]);
+
+  useEffect(() => {
+    setProductPage((current) => Math.min(current, totalProductPages));
+  }, [totalProductPages]);
 
   useEffect(() => {
     api.products
@@ -868,12 +1159,37 @@ function Products({ user, notify }: { user: User; notify: (message: string) => v
         setStockMatches(found);
         setStockProductId((current) => (current && found.some((product) => product.id === current) ? current : found[0]?.id ?? ""));
       })
-      .catch(() => setStockMatches([]));
-  }, [stockQuery]);
+      .catch((err) => {
+        setStockMatches([]);
+        notify(friendlyErrorMessage(err, "Products could not be searched. Please try again."), "error");
+      });
+  }, [stockQuery, notify]);
+
+  useEffect(() => {
+    if (!productModalOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setProductModalOpen(false);
+      setEditingProduct(null);
+      setForm(emptyProductForm);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [productModalOpen]);
 
   const resetForm = () => {
     setEditingProduct(null);
     setForm(emptyProductForm);
+  };
+
+  const openNewProduct = () => {
+    resetForm();
+    setProductModalOpen(true);
+  };
+
+  const closeProductModal = () => {
+    setProductModalOpen(false);
+    resetForm();
   };
 
   const editProduct = (product: Product) => {
@@ -891,6 +1207,7 @@ function Products({ user, notify }: { user: User; notify: (message: string) => v
       lowStockThreshold: product.lowStockThreshold,
       isActive: product.isActive
     });
+    setProductModalOpen(true);
   };
 
   const generateSku = () => {
@@ -913,10 +1230,10 @@ function Products({ user, notify }: { user: User; notify: (message: string) => v
         await api.products.create({ ...payload, stock: 0 });
         notify("Product saved.");
       }
-      resetForm();
+      closeProductModal();
       await load();
     } catch (err) {
-      notify(err instanceof Error ? err.message : "Product could not be saved.");
+      notify(friendlyErrorMessage(err, "The product could not be saved. Check the entered information and try again."), "error");
     }
   }
 
@@ -924,42 +1241,56 @@ function Products({ user, notify }: { user: User; notify: (message: string) => v
     event.preventDefault();
     if (user.role !== "admin") return;
     if (!selectedStockProduct || receiveQty <= 0) {
-      notify("Select a product and enter a quantity greater than zero.");
+      notify("Select a product and enter a quantity greater than zero before receiving stock.", "error");
       return;
     }
-    await api.inventory.adjust(selectedStockProduct.id, receiveQty, receiveNote || `Stock received: ${receiveQty}`);
-    notify(`${receiveQty} ${selectedStockProduct.unit} added to ${selectedStockProduct.name}.`);
-    setReceiveQty(0);
-    setReceiveNote("");
-    await load();
-    const refreshed = await api.products.list({ query: stockQuery, includeInactive: false });
-    setStockMatches(refreshed);
+    try {
+      await api.inventory.adjust(selectedStockProduct.id, receiveQty, receiveNote || `Stock received: ${receiveQty}`, "stock_in");
+      notify(`${receiveQty} ${selectedStockProduct.unit} added to ${selectedStockProduct.name}.`);
+      setReceiveQty(0);
+      setReceiveNote("");
+      await load();
+      const refreshed = await api.products.list({ query: stockQuery, includeInactive: false });
+      setStockMatches(refreshed);
+    } catch (err) {
+      notify(friendlyErrorMessage(err, "The stock could not be received. Check the quantity and try again."), "error");
+    }
   }
 
   async function printLabelsForStock() {
     if (!selectedStockProduct) {
-      notify("Select a product first.");
+      notify("Select a product before printing labels.", "error");
       return;
     }
-    await api.printing.printBarcode(selectedStockProduct.id, Math.max(1, labelQty)).catch(() => notify("Could not print barcode labels."));
+    await api.printing
+      .printBarcode(selectedStockProduct.id, Math.max(1, labelQty))
+      .catch((err) => notify(friendlyErrorMessage(err, "The barcode labels could not be printed. Check the printer mode and try again."), "error"));
   }
 
   const importCsv = async (file: File | undefined) => {
     if (!file) return;
-    const csv = await file.text();
-    const result = await api.products.importCsv(csv);
-    notify(`Imported ${result.imported}, skipped ${result.skipped}.`);
-    await load();
+    try {
+      const csv = await file.text();
+      const result = await api.products.importCsv(csv);
+      notify(`Imported ${result.imported}, skipped ${result.skipped}.`);
+      await load();
+    } catch (err) {
+      notify(friendlyErrorMessage(err, "The product CSV could not be imported. Check the file format and try again."), "error");
+    }
   };
 
   const deleteProduct = async (product: Product) => {
     if (user.role !== "admin") return;
     const confirmed = window.confirm(`Delete ${product.name}? This will deactivate the product but keep sales and stock history.`);
     if (!confirmed) return;
-    await api.products.delete(product.id);
-    notify(`${product.name} deleted.`);
-    if (editingProduct?.id === product.id) resetForm();
-    await load();
+    try {
+      await api.products.delete(product.id);
+      notify(`${product.name} deleted.`);
+      if (editingProduct?.id === product.id) closeProductModal();
+      await load();
+    } catch (err) {
+      notify(friendlyErrorMessage(err, `${product.name} could not be deleted. Please try again.`), "error");
+    }
   };
 
   return (
@@ -971,22 +1302,22 @@ function Products({ user, notify }: { user: User; notify: (message: string) => v
         <Metric label="Retail value" value={formatBdt(metrics.retailValue)} />
       </div>
       <div className="product-management-grid">
-      <form className="panel product-form" onSubmit={submit}>
+      {productModalOpen && (
+      <div className="modal-backdrop product-modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="product-modal-title">
+      <form className="product-setup-modal product-form" onSubmit={submit}>
         <div className="screen-heading">
           <div>
-            <h2>{editingProduct ? "Edit Product Setup" : "Product Setup"}</h2>
+            <h2 id="product-modal-title">{editingProduct ? "Edit Product" : "Add New Product"}</h2>
             <p>Create the product identity, barcode, price, VAT, and reorder alert</p>
           </div>
-          <button type="button" className="secondary compact" onClick={resetForm}>
-            <RefreshCw size={15} /> New
-          </button>
+          <button type="button" className="icon-button" onClick={closeProductModal} aria-label="Close product setup"><X size={20} /></button>
         </div>
         {user.role !== "admin" && <div className="notice">Admin permission is required to save products.</div>}
         <div className="notice neutral">Stock quantity is handled separately in Stock Entry. Create the product once, then receive stock by quantity.</div>
         <div className="form-section">
           <label>
             Product name
-            <input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} required />
+            <input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} required autoFocus />
           </label>
           <label>
             Category
@@ -1041,18 +1372,22 @@ function Products({ user, notify }: { user: User; notify: (message: string) => v
           <button className="primary" type="submit" disabled={user.role !== "admin"}>
             {editingProduct ? "Update Product" : "Save Product"}
           </button>
-          <button type="button" className="secondary" onClick={resetForm}>
+          <button type="button" className="secondary" onClick={closeProductModal}>
             Cancel
           </button>
         </div>
       </form>
+      </div>
+      )}
       <form className="panel stock-entry-panel" onSubmit={receiveStock}>
         <div className="screen-heading">
           <div>
             <h2>Stock Entry</h2>
             <p>Scan/select one product, enter received quantity, then print labels if needed</p>
           </div>
-          <Boxes />
+          <button type="button" className="primary compact" onClick={openNewProduct} disabled={user.role !== "admin"}>
+            <Plus size={17} /> Add New Product
+          </button>
         </div>
         {user.role !== "admin" && <div className="notice">Admin permission is required to receive stock.</div>}
         <label>
@@ -1128,6 +1463,30 @@ function Products({ user, notify }: { user: User; notify: (message: string) => v
             Include inactive
           </label>
         </div>
+        <div className="product-date-filters">
+          <label>
+            Filter date by
+            <select value={dateFilterField} onChange={(event) => setDateFilterField(event.target.value as "createdAt" | "updatedAt")}>
+              <option value="updatedAt">Last updated</option>
+              <option value="createdAt">Created date</option>
+            </select>
+          </label>
+          <label>
+            From date
+            <input type="date" value={dateFrom} max={dateTo || undefined} onChange={(event) => setDateFrom(event.target.value)} />
+          </label>
+          <label>
+            To date
+            <input type="date" value={dateTo} min={dateFrom || undefined} onChange={(event) => setDateTo(event.target.value)} />
+          </label>
+          <button type="button" className="secondary" disabled={!dateFrom && !dateTo} onClick={() => {
+            setDateFrom("");
+            setDateTo("");
+          }}>
+            Clear Dates
+          </button>
+        </div>
+        {invalidDateRange && <div className="notice">The From date must be before or the same as the To date.</div>}
         <div className="product-table">
           <div className="product-row product-row-header">
             <span>Product</span>
@@ -1135,9 +1494,10 @@ function Products({ user, notify }: { user: User; notify: (message: string) => v
             <span>Price</span>
             <span>Stock</span>
             <span>Status</span>
+            <span>History</span>
             <span>Actions</span>
           </div>
-          {products.map((product) => (
+          {pagedProducts.map((product) => (
             <div className="product-row" key={product.id}>
               <div>
                 <strong>{product.name}</strong>
@@ -1156,20 +1516,43 @@ function Products({ user, notify }: { user: User; notify: (message: string) => v
                 <small>Alert at {product.lowStockThreshold}</small>
               </div>
               <span className={`status-pill ${product.isActive ? "active" : "inactive"}`}>{product.isActive ? "Active" : "Inactive"}</span>
+              <div className="product-history-date">
+                <span>{new Date(product.updatedAt).toLocaleDateString()}</span>
+                <small>Created {new Date(product.createdAt).toLocaleDateString()}</small>
+              </div>
               <div className="row-actions">
                 <button className="secondary compact" onClick={() => editProduct(product)}><Edit3 size={15} /> Edit</button>
-                <button className="secondary compact" onClick={() => api.printing.printBarcode(product.id, 1).catch(() => notify("Could not print barcode."))}><Printer size={15} /> Label</button>
+                <button className="secondary compact" onClick={() => api.printing.printBarcode(product.id, 1).catch((err) => notify(friendlyErrorMessage(err, "The barcode label could not be printed. Check the printer mode and try again."), "error"))}><Printer size={15} /> Label</button>
                 <button className="danger compact" onClick={() => void deleteProduct(product)} disabled={user.role !== "admin" || !product.isActive}><Trash2 size={15} /> Delete</button>
               </div>
             </div>
           ))}
+          {!invalidDateRange && pagedProducts.length === 0 && (
+            <div className="empty-state">No products match the selected filters.</div>
+          )}
         </div>
+        {!invalidDateRange && datedProducts.length > 0 && (
+          <div className="pagination-bar">
+            <span>
+              Showing {pageStart + 1}-{Math.min(pageStart + productsPerPage, datedProducts.length)} of {datedProducts.length} products
+            </span>
+            <div className="pagination-actions">
+              <button type="button" className="secondary compact" disabled={productPage === 1} onClick={() => setProductPage((page) => Math.max(1, page - 1))}>
+                Previous
+              </button>
+              <strong>Page {productPage} of {totalProductPages}</strong>
+              <button type="button" className="secondary compact" disabled={productPage === totalProductPages} onClick={() => setProductPage((page) => Math.min(totalProductPages, page + 1))}>
+                Next
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </section>
   );
 }
 
-function Inventory({ notify }: { notify: (message: string) => void }) {
+function Inventory({ notify }: { notify: Notify }) {
   const [products, setProducts] = useState<Product[]>([]);
   const [movements, setMovements] = useState<InventoryMovement[]>([]);
   const [productId, setProductId] = useState("");
@@ -1182,15 +1565,21 @@ function Inventory({ notify }: { notify: (message: string) => void }) {
     setProductId((current) => current || found[0]?.id || "");
     setMovements(await api.inventory.listMovements());
   };
-  useEffect(() => void load(), []);
+  useEffect(() => {
+    void load().catch((err) => notify(friendlyErrorMessage(err, "Inventory could not be loaded. Please try again."), "error"));
+  }, [notify]);
 
   async function adjust(event: FormEvent) {
     event.preventDefault();
-    await api.inventory.adjust(productId, quantity, note);
-    notify("Inventory adjusted.");
-    setQuantity(0);
-    setNote("");
-    await load();
+    try {
+      await api.inventory.adjust(productId, quantity, note);
+      notify("Inventory adjusted.");
+      setQuantity(0);
+      setNote("");
+      await load();
+    } catch (err) {
+      notify(friendlyErrorMessage(err, "Inventory could not be adjusted. Check the quantity and try again."), "error");
+    }
   }
 
   return (
@@ -1227,7 +1616,7 @@ function Inventory({ notify }: { notify: (message: string) => void }) {
   );
 }
 
-function EnhancedInventory({ notify }: { notify: (message: string) => void }) {
+function EnhancedInventory({ notify }: { notify: Notify }) {
   const [products, setProducts] = useState<Product[]>([]);
   const [movements, setMovements] = useState<InventoryMovement[]>([]);
   const [productId, setProductId] = useState("");
@@ -1236,6 +1625,8 @@ function EnhancedInventory({ notify }: { notify: (message: string) => void }) {
   const [quantity, setQuantity] = useState(0);
   const [note, setNote] = useState("");
   const [movementFilter, setMovementFilter] = useState("all");
+  const [movementQuery, setMovementQuery] = useState("");
+  const [movementPage, setMovementPage] = useState(1);
   const selectedProduct = products.find((product) => product.id === productId);
   const lowStockProducts = products.filter((product) => product.stock <= product.lowStockThreshold);
   const outOfStockProducts = products.filter((product) => product.stock <= 0);
@@ -1252,7 +1643,22 @@ function EnhancedInventory({ notify }: { notify: (message: string) => void }) {
     operation === "count" && selectedProduct ? quantity - selectedProduct.stock :
     quantity;
   const afterStock = selectedProduct ? selectedProduct.stock + delta : 0;
-  const visibleMovements = movements.filter((movement) => movementFilter === "all" || movement.type === movementFilter);
+  const normalizedMovementQuery = movementQuery.trim().toLowerCase();
+  const visibleMovements = movements.filter((movement) => {
+    if (movementFilter !== "all" && movement.type !== movementFilter) return false;
+    if (!normalizedMovementQuery) return true;
+    return [
+      movement.productName,
+      movement.type.replace("_", " "),
+      String(movement.quantity),
+      movement.note,
+      new Date(movement.createdAt).toLocaleString()
+    ].some((value) => value.toLowerCase().includes(normalizedMovementQuery));
+  });
+  const movementsPerPage = 20;
+  const totalMovementPages = Math.max(1, Math.ceil(visibleMovements.length / movementsPerPage));
+  const movementPageStart = (movementPage - 1) * movementsPerPage;
+  const pagedMovements = visibleMovements.slice(movementPageStart, movementPageStart + movementsPerPage);
 
   const load = async () => {
     const found = await api.products.list({ query: productQuery, includeInactive: false });
@@ -1261,20 +1667,30 @@ function EnhancedInventory({ notify }: { notify: (message: string) => void }) {
     setMovements(await api.inventory.listMovements());
   };
 
-  useEffect(() => void load(), [productQuery]);
+  useEffect(() => {
+    void load().catch((err) => notify(friendlyErrorMessage(err, "Inventory could not be loaded. Please try again."), "error"));
+  }, [productQuery, notify]);
+
+  useEffect(() => {
+    setMovementPage(1);
+  }, [movementFilter, movementQuery]);
+
+  useEffect(() => {
+    setMovementPage((current) => Math.min(current, totalMovementPages));
+  }, [totalMovementPages]);
 
   async function saveMovement(event: FormEvent) {
     event.preventDefault();
     if (!selectedProduct) {
-      notify("Select a product first.");
+      notify("Select a product before saving a stock movement.", "error");
       return;
     }
     if (operation !== "count" && quantity <= 0) {
-      notify("Quantity must be greater than zero.");
+      notify("Enter a quantity greater than zero before saving the stock movement.", "error");
       return;
     }
     if (afterStock < 0) {
-      notify("Stock cannot go below zero.");
+      notify("This movement would make the stock negative. Reduce the quantity and try again.", "error");
       return;
     }
     const movementType = operation === "count" ? "adjustment" : operation;
@@ -1284,9 +1700,10 @@ function EnhancedInventory({ notify }: { notify: (message: string) => void }) {
       notify("Inventory updated.");
       setQuantity(0);
       setNote("");
+      setMovementPage(1);
       await load();
     } catch (err) {
-      notify(err instanceof Error ? err.message : "Inventory could not be updated.");
+      notify(friendlyErrorMessage(err, "Inventory could not be updated. Check the entered information and try again."), "error");
     }
   }
 
@@ -1394,18 +1811,30 @@ function EnhancedInventory({ notify }: { notify: (message: string) => void }) {
             <h2>Movement History</h2>
             <p>Audit trail for receipts, removals, counts, sales, and returns</p>
           </div>
-          <select value={movementFilter} onChange={(event) => setMovementFilter(event.target.value)}>
-            <option value="all">All movements</option>
-            <option value="stock_in">Stock in</option>
-            <option value="stock_out">Stock out</option>
-            <option value="adjustment">Adjustment/count</option>
-            <option value="sale">Sales</option>
-            <option value="return">Returns</option>
-          </select>
+          <div className="movement-history-filters">
+            <div className="movement-search">
+              <Search size={17} />
+              <input
+                value={movementQuery}
+                onChange={(event) => setMovementQuery(event.target.value)}
+                placeholder="Search product, quantity, or note"
+                aria-label="Search movement history"
+              />
+              {movementQuery && <button type="button" className="icon-button" onClick={() => setMovementQuery("")} aria-label="Clear movement search"><X size={17} /></button>}
+            </div>
+            <select value={movementFilter} onChange={(event) => setMovementFilter(event.target.value)}>
+              <option value="all">All movements</option>
+              <option value="stock_in">Stock in</option>
+              <option value="stock_out">Stock out</option>
+              <option value="adjustment">Adjustment/count</option>
+              <option value="sale">Sales</option>
+              <option value="return">Returns</option>
+            </select>
+          </div>
         </div>
         <DataTable
           headers={["Date", "Product", "Type", "Qty", "Note"]}
-          rows={visibleMovements.map((movement) => [
+          rows={pagedMovements.map((movement) => [
             new Date(movement.createdAt).toLocaleString(),
             movement.productName,
             movement.type,
@@ -1413,22 +1842,45 @@ function EnhancedInventory({ notify }: { notify: (message: string) => void }) {
             movement.note
           ])}
         />
+        {visibleMovements.length === 0 && <div className="empty-state">No inventory movements match this filter.</div>}
+        {visibleMovements.length > 0 && (
+          <div className="pagination-bar">
+            <span>
+              Showing {movementPageStart + 1}-{Math.min(movementPageStart + movementsPerPage, visibleMovements.length)} of {visibleMovements.length} movements
+            </span>
+            <div className="pagination-actions">
+              <button type="button" className="secondary compact" disabled={movementPage === 1} onClick={() => setMovementPage((page) => Math.max(1, page - 1))}>
+                Previous
+              </button>
+              <strong>Page {movementPage} of {totalMovementPages}</strong>
+              <button type="button" className="secondary compact" disabled={movementPage === totalMovementPages} onClick={() => setMovementPage((page) => Math.min(totalMovementPages, page + 1))}>
+                Next
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </section>
   );
 }
 
-function Reports() {
+function Reports({ notify }: { notify: Notify }) {
   const today = toDateInput(new Date());
   const [dateFrom, setDateFrom] = useState(toDateInput(addDays(new Date(), -6)));
   const [dateTo, setDateTo] = useState(today);
   const [dailyReports, setDailyReports] = useState<SalesReport[]>([]);
+  const [rangeReport, setRangeReport] = useState<SalesReport | null>(null);
   const [topProducts, setTopProducts] = useState<ProductSalesReport[]>([]);
   const [inventoryValue, setInventoryValue] = useState<InventoryValueReport | null>(null);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
+  const [receiptQuery, setReceiptQuery] = useState("");
+  const [receiptResults, setReceiptResults] = useState<Sale[]>([]);
+  const [receiptSearchComplete, setReceiptSearchComplete] = useState(false);
+  const [receiptSearching, setReceiptSearching] = useState(false);
+  const [billPreview, setBillPreview] = useState<{ sale: Sale; html: string } | null>(null);
+  const [reprintingSaleId, setReprintingSaleId] = useState("");
   const rangeDates = useMemo(() => buildDateRange(dateFrom, dateTo).slice(-31), [dateFrom, dateTo]);
-  const totals = useMemo(() => summarizeReports(dailyReports), [dailyReports]);
+  const totals = rangeReport ?? summarizeReports([]);
   const bestProduct = topProducts[0];
   const inventoryProfit = inventoryValue ? inventoryValue.retailValue - inventoryValue.costValue : 0;
   const inventoryMargin = inventoryValue?.retailValue ? (inventoryProfit / inventoryValue.retailValue) * 100 : 0;
@@ -1436,20 +1888,21 @@ function Reports() {
   useEffect(() => {
     let active = true;
     setLoading(true);
-    setError("");
     Promise.all([
       Promise.all(rangeDates.map((date) => api.reports.getDailySales(date))),
+      api.reports.getSalesSummary(dateFrom, dateTo),
       api.reports.getProductSales(dateFrom, dateTo),
       api.reports.getInventoryValue()
     ])
-      .then(([daily, products, inventory]) => {
+      .then(([daily, summary, products, inventory]) => {
         if (!active) return;
         setDailyReports(daily);
+        setRangeReport(summary);
         setTopProducts(products);
         setInventoryValue(inventory);
       })
       .catch((err) => {
-        if (active) setError(err instanceof Error ? err.message : "Reports could not be loaded.");
+        if (active) notify(friendlyErrorMessage(err, "Reports could not be loaded. Please try again."), "error");
       })
       .finally(() => {
         if (active) setLoading(false);
@@ -1457,11 +1910,52 @@ function Reports() {
     return () => {
       active = false;
     };
-  }, [dateFrom, dateTo, rangeDates]);
+  }, [dateFrom, dateTo, rangeDates, notify]);
 
   const setPreset = (days: number) => {
     setDateTo(today);
     setDateFrom(toDateInput(addDays(new Date(), -(days - 1))));
+  };
+
+  const searchReceipts = async () => {
+    const query = receiptQuery.trim();
+    if (!query) {
+      notify("Enter a receipt number before searching for a bill.", "error");
+      return;
+    }
+    setReceiptSearching(true);
+    try {
+      setReceiptResults(await api.sales.searchReceipts(query));
+      setReceiptSearchComplete(true);
+    } catch (err) {
+      setReceiptResults([]);
+      setReceiptSearchComplete(false);
+      notify(friendlyErrorMessage(err, "Bills could not be searched. Check the receipt number and try again."), "error");
+    } finally {
+      setReceiptSearching(false);
+    }
+  };
+
+  const viewBill = async (sale: Sale) => {
+    try {
+      const html = await api.sales.previewSavedReceipt(sale.id);
+      setBillPreview({ sale, html });
+    } catch (err) {
+      notify(friendlyErrorMessage(err, "The saved bill preview could not be opened. Please try again."), "error");
+    }
+  };
+
+  const reprintBill = async (sale: Sale) => {
+    if (reprintingSaleId) return;
+    setReprintingSaleId(sale.id);
+    try {
+      await api.printing.printReceipt(sale.id);
+      notify(`Receipt ${sale.receiptNo} sent to the printer.`);
+    } catch (err) {
+      notify(friendlyErrorMessage(err, "The bill could not be reprinted. Check the printer connection and receipt mode, then try again."), "error");
+    } finally {
+      setReprintingSaleId("");
+    }
   };
 
   return (
@@ -1492,7 +1986,6 @@ function Reports() {
             <small>{rangeDates.length === 31 ? "Trend is capped at latest 31 days for fast loading." : "Range summary uses selected dates."}</small>
           </div>
         </div>
-        {error && <div className="notice">{error}</div>}
         {loading && <div className="notice neutral">Loading report data...</div>}
         <div className="metric-grid report-metrics">
           <Metric label="Net sales" value={formatBdt(totals.grandTotal)} />
@@ -1502,6 +1995,59 @@ function Reports() {
           <Metric label="VAT collected" value={formatBdt(totals.vatTotal)} />
           <Metric label="Discounts" value={formatBdt(totals.discountTotal)} />
         </div>
+      </div>
+
+      <div className="panel receipt-lookup-panel">
+        <div className="screen-heading">
+          <div>
+            <h2>Find a Bill</h2>
+            <p>Search saved bills using the full or partial receipt number</p>
+          </div>
+          <Receipt />
+        </div>
+        <div className="receipt-search-bar">
+          <input
+            value={receiptQuery}
+            onChange={(event) => {
+              setReceiptQuery(event.target.value);
+              setReceiptSearchComplete(false);
+            }}
+            placeholder="Example: TP-1787559035"
+            aria-label="Receipt number"
+          />
+          <button type="button" className="primary" onClick={searchReceipts} disabled={receiptSearching}>
+            <Search size={17} /> {receiptSearching ? "Searching..." : "Search Bill"}
+          </button>
+        </div>
+        {receiptSearchComplete && receiptResults.length === 0 && (
+          <div className="empty-state">No bill was found with that receipt number.</div>
+        )}
+        {receiptResults.length > 0 && (
+          <div className="receipt-search-results">
+            <div className="receipt-result-row receipt-result-header">
+              <span>Receipt</span><span>Date</span><span>Cashier</span><span>Total</span><span>Status</span><span>Action</span>
+            </div>
+            {receiptResults.map((sale) => (
+              <div className="receipt-result-row" key={sale.id}>
+                <strong>{sale.receiptNo}</strong>
+                <span>{new Date(sale.createdAt).toLocaleString()}</span>
+                <span>{sale.cashierName}</span>
+                <strong>{formatBdt(sale.totals.grandTotal)}</strong>
+                <span className={`status-pill ${sale.status === "completed" ? "active" : "inactive"}`}>
+                  {sale.status === "completed" ? "Completed" : "Returned"}
+                </span>
+                <div className="row-actions receipt-actions">
+                  <button type="button" className="secondary compact" onClick={() => void viewBill(sale)}>
+                    <Receipt size={15} /> View Bill
+                  </button>
+                  <button type="button" className="secondary compact" disabled={Boolean(reprintingSaleId)} onClick={() => void reprintBill(sale)}>
+                    <Printer size={15} /> {reprintingSaleId === sale.id ? "Printing..." : "Reprint"}
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="report-grid">
@@ -1525,8 +2071,8 @@ function Reports() {
           </div>
           <ProgressChart
             rows={[
-              { label: "Net sales", value: totals.grandTotal, color: "#0f766e" },
-              { label: "Profit", value: totals.profitEstimate, color: "#2563eb" },
+              { label: "Net sales", value: totals.grandTotal, color: "var(--brand-blue)" },
+              { label: "Profit", value: totals.profitEstimate, color: "var(--brand-light-blue)" },
               { label: "VAT", value: totals.vatTotal, color: "#c2410c" },
               { label: "Discount", value: totals.discountTotal, color: "#be123c" }
             ]}
@@ -1563,9 +2109,9 @@ function Reports() {
               </div>
               <ProgressChart
                 rows={[
-                  { label: "Retail value", value: inventoryValue.retailValue, color: "#0f766e" },
+                  { label: "Retail value", value: inventoryValue.retailValue, color: "var(--brand-blue)" },
                   { label: "Cost value", value: inventoryValue.costValue, color: "#475467" },
-                  { label: "Stock margin", value: Math.max(0, inventoryProfit), color: "#2563eb" },
+                  { label: "Stock margin", value: Math.max(0, inventoryProfit), color: "var(--brand-light-blue)" },
                   { label: "Low stock items", value: inventoryValue.lowStockCount, color: "#c2410c" }
                 ]}
               />
@@ -1598,6 +2144,31 @@ function Reports() {
           ])}
         />
       </div>
+      {billPreview && (
+        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="saved-bill-preview-title">
+          <div className="invoice-modal">
+            <div className="modal-heading">
+              <div>
+                <h2 id="saved-bill-preview-title">Bill Preview</h2>
+                <p>{billPreview.sale.receiptNo} - {new Date(billPreview.sale.createdAt).toLocaleString()}</p>
+              </div>
+              <button className="icon-button" type="button" onClick={() => setBillPreview(null)} aria-label="Close bill preview"><X size={20} /></button>
+            </div>
+            <div className="invoice-preview-area">
+              <ReceiptPreview html={billPreview.html} title={`Bill ${billPreview.sale.receiptNo}`} />
+            </div>
+            <div className="modal-actions">
+              <span className={`status-pill ${billPreview.sale.status === "completed" ? "active" : "inactive"}`}>
+                {billPreview.sale.status === "completed" ? "Completed bill" : "Returned bill"}
+              </span>
+              <button type="button" className="secondary" disabled={Boolean(reprintingSaleId)} onClick={() => void reprintBill(billPreview.sale)}>
+                <Printer size={16} /> {reprintingSaleId === billPreview.sale.id ? "Printing..." : "Reprint"}
+              </button>
+              <button type="button" className="primary" onClick={() => setBillPreview(null)}>Close</button>
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   );
 }
@@ -1712,7 +2283,7 @@ function formatPercent(value: number) {
   return `${value.toFixed(1)}%`;
 }
 
-function SettingsScreen({ user, notify, onFactoryReset }: { user: User; notify: (message: string) => void; onFactoryReset: () => void }) {
+function SettingsScreen({ user, notify, onFactoryReset }: { user: User; notify: Notify; onFactoryReset: () => void }) {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [printers, setPrinters] = useState<string[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
@@ -1727,10 +2298,15 @@ function SettingsScreen({ user, notify, onFactoryReset }: { user: User; notify: 
     setSettings(nextSettings);
     setProducts(nextProducts);
     setLabelProductId((current) => (current && nextProducts.some((product) => product.id === current) ? current : nextProducts[0]?.id ?? ""));
-    api.printing.listPrinters().then(setPrinters).catch(() => setPrinters([]));
+    api.printing.listPrinters().then(setPrinters).catch((err) => {
+      setPrinters([]);
+      notify(friendlyErrorMessage(err, "Windows printers could not be loaded. Check the printer connection and try refreshing."), "error");
+    });
   };
 
-  useEffect(() => void load(), []);
+  useEffect(() => {
+    void load().catch((err) => notify(friendlyErrorMessage(err, "Settings could not be loaded. Please reopen Settings and try again."), "error"));
+  }, [notify]);
 
   if (!settings) return null;
 
@@ -1745,20 +2321,20 @@ function SettingsScreen({ user, notify, onFactoryReset }: { user: User; notify: 
     discount: 5,
     vatRate: 15
   };
-  const previewReceipt = buildReceiptText(
-    {
-      id: "preview",
-      receiptNo: "TP-PREVIEW",
-      lines: [sampleLine],
-      payment: { method: "cash", amount: 300 },
-      totals: calculateTotals([sampleLine]),
-      cashierId: user.id,
-      cashierName: user.username,
-      status: "completed",
-      createdAt: new Date().toISOString()
-    },
-    settings
-  );
+  const previewSale = {
+    id: "preview",
+    receiptNo: "TP-PREVIEW",
+    lines: [sampleLine],
+    payment: { method: "cash" as const, amount: 300 },
+    totals: calculateTotals([sampleLine]),
+    cashierId: user.id,
+    cashierName: user.username,
+    status: "completed" as const,
+    createdAt: new Date().toISOString()
+  };
+  const previewReceipt = settings.printerMode === "xprinter"
+    ? buildReceiptHtml(previewSale, settings, { widthPx: XP365B_SAFE_RECEIPT_WIDTH_DOTS, thermal: true })
+    : buildReceiptHtml(previewSale, settings);
 
   const updateReceipt = (receipt: Partial<AppSettings["receipt"]>) => {
     setSettings({ ...settings, receipt: { ...settings.receipt, ...receipt } });
@@ -1782,8 +2358,10 @@ function SettingsScreen({ user, notify, onFactoryReset }: { user: User; notify: 
         canvas.getContext("2d")?.drawImage(image, 0, 0, canvas.width, canvas.height);
         updateReceipt({ logoDataUrl: canvas.toDataURL("image/png") });
       };
+      image.onerror = () => notify("The selected file is not a readable image. Choose a PNG, JPEG, or other supported image and try again.", "error");
       image.src = String(reader.result);
     };
+    reader.onerror = () => notify("The logo file could not be read. Choose another image and try again.", "error");
     reader.readAsDataURL(file);
   };
 
@@ -1792,7 +2370,7 @@ function SettingsScreen({ user, notify, onFactoryReset }: { user: User; notify: 
       setSettings(await api.settings.update(settings));
       notify("Settings saved.");
     } catch (err) {
-      notify(err instanceof Error ? err.message : "Settings could not be saved.");
+      notify(friendlyErrorMessage(err, "Settings could not be saved. Check the entered values and try again."), "error");
     }
   };
 
@@ -1802,7 +2380,7 @@ function SettingsScreen({ user, notify, onFactoryReset }: { user: User; notify: 
       notify(`Backup imported: ${path}`);
       await load();
     } catch (err) {
-      notify(err instanceof Error ? err.message : "Backup import failed.");
+      notify(friendlyErrorMessage(err, "The backup could not be imported. Select a valid TruePOS backup and try again."), "error");
     }
   };
 
@@ -1812,7 +2390,7 @@ function SettingsScreen({ user, notify, onFactoryReset }: { user: User; notify: 
       setSettings(await api.backup.connectGoogleDrive());
       notify("Google Drive connected.");
     } catch (err) {
-      notify(err instanceof Error ? err.message : "Google Drive connection failed.");
+      notify(friendlyErrorMessage(err, "Google Drive could not be connected. Check the internet connection and try again."), "error");
     }
   };
 
@@ -1822,7 +2400,7 @@ function SettingsScreen({ user, notify, onFactoryReset }: { user: User; notify: 
       setSettings(await api.backup.backupGoogleDriveNow());
       notify("Google Drive backup uploaded.");
     } catch (err) {
-      notify(err instanceof Error ? err.message : "Google Drive backup failed.");
+      notify(friendlyErrorMessage(err, "The Google Drive backup could not be uploaded. Check the connection and try again."), "error");
     }
   };
 
@@ -1831,7 +2409,7 @@ function SettingsScreen({ user, notify, onFactoryReset }: { user: User; notify: 
       setSettings(await api.backup.disconnectGoogleDrive());
       notify("Google Drive disconnected.");
     } catch (err) {
-      notify(err instanceof Error ? err.message : "Could not disconnect Google Drive.");
+      notify(friendlyErrorMessage(err, "Google Drive could not be disconnected. Please try again."), "error");
     }
   };
 
@@ -1844,7 +2422,45 @@ function SettingsScreen({ user, notify, onFactoryReset }: { user: User; notify: 
       await api.backup.factoryReset();
       onFactoryReset();
     } catch (err) {
-      notify(err instanceof Error ? err.message : "Factory reset failed.");
+      notify(friendlyErrorMessage(err, "Factory reset could not be completed. No data was intentionally removed; please try again."), "error");
+    }
+  };
+
+  const testReceipt = async () => {
+    try {
+      const saved = await api.settings.update(settings);
+      setSettings(saved);
+      await api.printing.testReceipt();
+      notify("Receipt test sent to the XP-365B.");
+    } catch (err) {
+      notify(friendlyErrorMessage(err, "The test receipt could not be printed. Check the printer connection and receipt mode."), "error");
+    }
+  };
+
+  const testLabels = async () => {
+    if (!selectedLabelProduct) {
+      notify("Add or select a product before printing a test label.", "error");
+      return;
+    }
+    try {
+      const saved = await api.settings.update(settings);
+      setSettings(saved);
+      await api.printing.printBarcode(selectedLabelProduct.id, Math.max(1, labelQuantity));
+      notify("Test labels sent to the XP-365B.");
+    } catch (err) {
+      notify(friendlyErrorMessage(err, "The test label could not be printed. Check that the XP-365B is in Label/TSPL mode."), "error");
+    }
+  };
+
+  const calibrateLabels = async () => {
+    if (!window.confirm("Label calibration feeds several labels while the XP-365B learns the 45x35mm gap. Continue?")) return;
+    try {
+      const saved = await api.settings.update(settings);
+      setSettings(saved);
+      await api.printing.calibrateLabels();
+      notify("XP-365B label gap calibration completed.");
+    } catch (err) {
+      notify(friendlyErrorMessage(err, "Label calibration could not be completed. Check the label roll and printer mode, then try again."), "error");
     }
   };
 
@@ -1884,9 +2500,17 @@ function SettingsScreen({ user, notify, onFactoryReset }: { user: User; notify: 
               </label>
               <label>
                 Printer mode
-                <select value={settings.printerMode} onChange={(event) => setSettings({ ...settings, printerMode: event.target.value as "windows" | "escpos" })}>
+                <select value={settings.printerMode} onChange={(event) => {
+                  const printerMode = event.target.value as "windows" | "xprinter";
+                  setSettings({
+                    ...settings,
+                    printerMode,
+                    receipt: printerMode === "xprinter" ? { ...settings.receipt, widthMm: 80 } : settings.receipt,
+                    barcode: printerMode === "xprinter" ? { ...settings.barcode, labelWidthMm: 45, labelHeightMm: 35 } : settings.barcode
+                  });
+                }}>
                   <option value="windows">Windows printer driver</option>
-                  <option value="escpos">ESC/POS compatible</option>
+                  <option value="xprinter">Xprinter XP-365B SDK (USB)</option>
                 </select>
               </label>
             </div>
@@ -1898,23 +2522,27 @@ function SettingsScreen({ user, notify, onFactoryReset }: { user: User; notify: 
                 <h2>POS Receipt Printer</h2>
                 <p>Thermal receipt paper, font, padding, header, footer, and VAT display</p>
               </div>
-              <button className="secondary compact" onClick={() => api.printing.listPrinters().then(setPrinters).catch(() => setPrinters([]))}>
+              <button className="secondary compact" onClick={() => api.printing.listPrinters().then(setPrinters).catch((err) => {
+                setPrinters([]);
+                notify(friendlyErrorMessage(err, "Windows printers could not be refreshed. Check the printer connection and try again."), "error");
+              })}>
                 <RefreshCw size={15} /> Refresh
               </button>
             </div>
             <label>
               Receipt printer
-              <select value={settings.receiptPrinter} onChange={(event) => setSettings({ ...settings, receiptPrinter: event.target.value })}>
+              <select disabled={settings.printerMode === "xprinter"} value={settings.receiptPrinter} onChange={(event) => setSettings({ ...settings, receiptPrinter: event.target.value })}>
                 <option value="">Default printer</option>
                 {printers.map((printer) => (
                   <option key={printer}>{printer}</option>
                 ))}
               </select>
             </label>
+            {settings.printerMode === "xprinter" && <div className="notice neutral">SDK mode connects directly to the fixed XP-365B over USB. Windows printer selection and page scaling are bypassed.</div>}
             <div className="form-section">
               <label>
                 Paper width
-                <select value={settings.receipt.widthMm} onChange={(event) => updateReceipt({ widthMm: Number(event.target.value) as 58 | 80 })}>
+                <select disabled={settings.printerMode === "xprinter"} value={settings.receipt.widthMm} onChange={(event) => updateReceipt({ widthMm: Number(event.target.value) as 58 | 80 })}>
                   <option value={58}>58mm</option>
                   <option value={80}>80mm</option>
                 </select>
@@ -1942,7 +2570,7 @@ function SettingsScreen({ user, notify, onFactoryReset }: { user: User; notify: 
               <input type="checkbox" checked={settings.receipt.showVatBreakdown} onChange={(event) => updateReceipt({ showVatBreakdown: event.target.checked })} />
               Show VAT breakdown on receipt
             </label>
-            <button className="secondary" onClick={() => api.printing.testReceipt().catch((err) => notify(err instanceof Error ? err.message : "Receipt test failed."))}>
+            <button className="secondary" disabled={user.role !== "admin"} onClick={testReceipt}>
               <Printer size={16} /> Test Receipt Print
             </button>
           </div>
@@ -1967,8 +2595,8 @@ function SettingsScreen({ user, notify, onFactoryReset }: { user: User; notify: 
                 <input type="range" min={25} max={200} value={settings.receipt.logoScale} onChange={(event) => updateReceipt({ logoScale: Number(event.target.value) })} />
               </label>
               <label>
-                Move left/right {settings.receipt.logoOffsetX}px
-                <input type="range" min={-80} max={80} value={settings.receipt.logoOffsetX} onChange={(event) => updateReceipt({ logoOffsetX: Number(event.target.value) })} />
+                {settings.printerMode === "xprinter" ? "Horizontally centered for XP-365B" : `Move left/right ${settings.receipt.logoOffsetX}px`}
+                <input disabled={settings.printerMode === "xprinter"} type="range" min={-80} max={80} value={settings.printerMode === "xprinter" ? 0 : settings.receipt.logoOffsetX} onChange={(event) => updateReceipt({ logoOffsetX: Number(event.target.value) })} />
               </label>
               <label>
                 Move up/down {settings.receipt.logoOffsetY}px
@@ -1989,7 +2617,7 @@ function SettingsScreen({ user, notify, onFactoryReset }: { user: User; notify: 
             </div>
             <label>
               Barcode printer
-              <select value={settings.barcodePrinter} onChange={(event) => setSettings({ ...settings, barcodePrinter: event.target.value })}>
+              <select disabled={settings.printerMode === "xprinter"} value={settings.barcodePrinter} onChange={(event) => setSettings({ ...settings, barcodePrinter: event.target.value })}>
                 <option value="">Default printer</option>
                 {printers.map((printer) => (
                   <option key={printer}>{printer}</option>
@@ -2002,6 +2630,14 @@ function SettingsScreen({ user, notify, onFactoryReset }: { user: User; notify: 
               <NumberInput label="Padding" value={settings.barcode.padding} onChange={(value) => updateBarcode({ padding: value })} />
               <NumberInput label="Test quantity" value={labelQuantity} onChange={setLabelQuantity} />
             </div>
+            {settings.printerMode === "xprinter" && (
+              <div className="form-section">
+                <NumberInput label="Print speed (1-5)" value={settings.barcode.printSpeed} onChange={(value) => updateBarcode({ printSpeed: value })} />
+                <NumberInput label="Density (0-15)" value={settings.barcode.density} onChange={(value) => updateBarcode({ density: value })} />
+                <NumberInput label="Label gap mm" value={settings.barcode.gapMm} onChange={(value) => updateBarcode({ gapMm: value })} />
+                <NumberInput label="Vertical offset mm" value={settings.barcode.offsetMm} onChange={(value) => updateBarcode({ offsetMm: value })} />
+              </div>
+            )}
             <div className="form-section">
               <label>
                 Test product
@@ -2020,9 +2656,16 @@ function SettingsScreen({ user, notify, onFactoryReset }: { user: User; notify: 
                 Show price
               </label>
             </div>
-            <button className="secondary" disabled={!selectedLabelProduct} onClick={() => selectedLabelProduct && api.printing.printBarcode(selectedLabelProduct.id, Math.max(1, labelQuantity)).catch((err) => notify(err instanceof Error ? err.message : "Barcode test failed."))}>
-              <Printer size={16} /> Print Test Labels
-            </button>
+            <div className="backup-actions">
+              <button className="secondary" disabled={user.role !== "admin" || !selectedLabelProduct} onClick={testLabels}>
+                <Printer size={16} /> Print Test Labels
+              </button>
+              {settings.printerMode === "xprinter" && (
+                <button className="secondary" disabled={user.role !== "admin"} onClick={calibrateLabels}>
+                  <RefreshCw size={16} /> Calibrate Label Gap
+                </button>
+              )}
+            </div>
           </div>
 
           <div className="panel form-grid">
@@ -2064,7 +2707,14 @@ function SettingsScreen({ user, notify, onFactoryReset }: { user: User; notify: 
               <div className="drive-status">
                 <span>{settings.googleDrive.accountEmail || "No Google account connected"}</span>
                 <small>{settings.googleDrive.lastBackupAt ? `Last backup: ${new Date(settings.googleDrive.lastBackupAt).toLocaleString()}` : "No Google Drive backup yet"}</small>
-                {settings.googleDrive.lastBackupStatus && <small>{settings.googleDrive.lastBackupStatus}</small>}
+                {settings.googleDrive.lastBackupStatus && (
+                  <small>
+                    {friendlyErrorMessage(
+                      settings.googleDrive.lastBackupStatus,
+                      "The last Google Drive backup did not complete. Reconnect Google Drive, then try again."
+                    )}
+                  </small>
+                )}
               </div>
               <div className="backup-actions">
                 <button className="secondary" disabled={user.role !== "admin"} onClick={connectGoogleDrive}>
@@ -2079,19 +2729,19 @@ function SettingsScreen({ user, notify, onFactoryReset }: { user: User; notify: 
               </div>
             </div>
             <div className="backup-actions">
-              <button className="secondary" onClick={() => api.backup.exportEncrypted().then((path) => notify(`Backup exported: ${path}`)).catch((err) => notify(err instanceof Error ? err.message : "Backup export failed."))}>
+              <button className="secondary" onClick={() => api.backup.exportEncrypted().then((path) => notify(`Backup exported: ${path}`)).catch((err) => notify(friendlyErrorMessage(err, "The encrypted backup could not be exported. Choose another location and try again."), "error"))}>
                 Export Encrypted Backup
               </button>
               <button className="danger" disabled={user.role !== "admin"} onClick={importBackup}>
                 Import Encrypted Backup
               </button>
-              <button className="secondary" onClick={() => api.backup.exportCsv("products").then((path) => notify(`CSV exported: ${path}`))}>
+              <button className="secondary" onClick={() => api.backup.exportCsv("products").then((path) => notify(`CSV exported: ${path}`)).catch((err) => notify(friendlyErrorMessage(err, "The products CSV could not be exported. Choose another location and try again."), "error"))}>
                 Export Products CSV
               </button>
-              <button className="secondary" onClick={() => api.backup.exportCsv("inventory").then((path) => notify(`CSV exported: ${path}`))}>
+              <button className="secondary" onClick={() => api.backup.exportCsv("inventory").then((path) => notify(`CSV exported: ${path}`)).catch((err) => notify(friendlyErrorMessage(err, "The inventory CSV could not be exported. Choose another location and try again."), "error"))}>
                 Export Inventory CSV
               </button>
-              <button className="secondary" onClick={() => api.backup.exportCsv("sales").then((path) => notify(`CSV exported: ${path}`))}>
+              <button className="secondary" onClick={() => api.backup.exportCsv("sales").then((path) => notify(`CSV exported: ${path}`)).catch((err) => notify(friendlyErrorMessage(err, "The sales CSV could not be exported. Choose another location and try again."), "error"))}>
                 Export Sales CSV
               </button>
             </div>
@@ -2116,35 +2766,7 @@ function SettingsScreen({ user, notify, onFactoryReset }: { user: User; notify: 
               </div>
             </div>
             <div className="receipt-preview-shell">
-              <div
-                className="receipt-preview-paper"
-                style={{
-                  width: `${settings.receipt.widthMm}mm`,
-                  padding: settings.receipt.padding,
-                  fontFamily: settings.receipt.fontFamily,
-                  fontSize: settings.receipt.fontSize
-                }}
-              >
-                {settings.receipt.logoDataUrl && (
-                  <div
-                    className="preview-logo-wrap"
-                    style={{
-                      transform: `translate(${settings.receipt.logoOffsetX}px, ${settings.receipt.logoOffsetY}px)`,
-                      marginBottom: `${8 + settings.receipt.logoOffsetY}px`
-                    }}
-                  >
-                    <img
-                      src={settings.receipt.logoDataUrl}
-                      alt="Receipt logo"
-                      style={{
-                        width: `${Math.max(8, settings.receipt.logoWidthMm * (settings.receipt.logoScale / 100))}mm`,
-                        height: `${Math.max(4, settings.receipt.logoHeightMm * (settings.receipt.logoScale / 100))}mm`
-                      }}
-                    />
-                  </div>
-                )}
-                <pre>{previewReceipt}</pre>
-              </div>
+              <ReceiptPreview html={previewReceipt} title="Receipt layout preview" />
             </div>
           </div>
 
@@ -2159,8 +2781,8 @@ function SettingsScreen({ user, notify, onFactoryReset }: { user: User; notify: 
               <div
                 className="barcode-label-preview"
                 style={{
-                  width: `${settings.barcode.labelWidthMm * 3}px`,
-                  height: `${settings.barcode.labelHeightMm * 3}px`,
+                  width: `${settings.barcode.labelWidthMm * 3.7795}px`,
+                  height: `${settings.barcode.labelHeightMm * 3.7795}px`,
                   padding: settings.barcode.padding
                 }}
               >

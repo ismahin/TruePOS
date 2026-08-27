@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, shell } from "electron";
+import { app, BrowserWindow, dialog, nativeImage, shell } from "electron";
 import type { BrowserWindow as BrowserWindowType } from "electron";
 import Database from "better-sqlite3-multiple-ciphers";
 import bwipjs from "bwip-js";
@@ -9,6 +9,7 @@ import path from "node:path";
 import Papa from "papaparse";
 import { v4 as uuid } from "uuid";
 import keytar from "keytar";
+import { XprinterSdk } from "./xprinter-sdk.js";
 import type {
   AppSettings,
   CartLine,
@@ -21,7 +22,8 @@ import type {
   SalesReport,
   User
 } from "../src/shared/contracts.js";
-import { buildReceiptText, calculateTotals, receiptStyle, validateCode128Value } from "../src/shared/pos.js";
+import { buildReceiptHtml, buildReceiptText, calculateTotals, money, validateCode128Value } from "../src/shared/pos.js";
+import { makeReceiptBitmapMonochrome, XP365B_SAFE_RECEIPT_WIDTH_DOTS, validateLabelQuantity } from "../src/shared/xprinter.js";
 
 type Row = Record<string, unknown>;
 
@@ -36,7 +38,7 @@ const defaultSettings: AppSettings = {
   currency: "BDT",
   receiptPrinter: "",
   barcodePrinter: "",
-  printerMode: "windows",
+  printerMode: "xprinter",
   receipt: {
     widthMm: 80,
     fontSize: 12,
@@ -55,9 +57,13 @@ const defaultSettings: AppSettings = {
   },
   barcode: {
     format: "code128",
-    labelWidthMm: 50,
-    labelHeightMm: 30,
+    labelWidthMm: 45,
+    labelHeightMm: 35,
     padding: 6,
+    printSpeed: 4,
+    density: 8,
+    gapMm: 2,
+    offsetMm: 0,
     showName: true,
     showPrice: true
   },
@@ -72,9 +78,12 @@ const defaultSettings: AppSettings = {
 };
 
 function mergeSettings(settings: Partial<AppSettings>): AppSettings {
+  const storedPrinterMode = String((settings as { printerMode?: string }).printerMode ?? "");
+  const printerMode = storedPrinterMode === "escpos" ? "xprinter" : storedPrinterMode === "windows" || storedPrinterMode === "xprinter" ? storedPrinterMode : defaultSettings.printerMode;
   return {
     ...defaultSettings,
     ...settings,
+    printerMode,
     receipt: {
       ...defaultSettings.receipt,
       ...settings.receipt
@@ -165,13 +174,38 @@ function isUnreadableDatabaseError(error: unknown) {
   return error instanceof Error && /file is not a database|not an error/i.test(error.message);
 }
 
+function requireFiniteNumber(value: unknown, label: string, options: { min?: number; max?: number } = {}) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) throw new Error(`${label} must be a valid number.`);
+  if (options.min !== undefined && number < options.min) throw new Error(`${label} must be at least ${options.min}.`);
+  if (options.max !== undefined && number > options.max) throw new Error(`${label} must not exceed ${options.max}.`);
+  return number;
+}
+
+function localDateRange(dateFrom: string, dateTo = dateFrom) {
+  const datePattern = /^\d{4}-\d{2}-\d{2}$/;
+  if (!datePattern.test(dateFrom) || !datePattern.test(dateTo)) throw new Error("Report dates must use YYYY-MM-DD format.");
+  const parse = (value: string) => {
+    const [year, month, day] = value.split("-").map(Number);
+    const result = new Date(year, month - 1, day);
+    if (result.getFullYear() !== year || result.getMonth() !== month - 1 || result.getDate() !== day) throw new Error("Invalid report date.");
+    return result;
+  };
+  const start = parse(dateFrom);
+  const end = parse(dateTo);
+  if (start > end) throw new Error("Invalid report date range.");
+  end.setDate(end.getDate() + 1);
+  return { start: start.toISOString(), end: end.toISOString() };
+}
+
 export class TruePOSServices {
   private db!: Database;
   private currentUser: User | null = null;
   private googleDriveBackupTimer: NodeJS.Timeout | null = null;
   private googleDriveBackupRunning = false;
+  private readonly xprinter = new XprinterSdk();
 
-  async init() {
+  async init(recoverUnreadable = true) {
     const dbPath = databasePath();
     const key = await getDatabaseKey();
     try {
@@ -180,7 +214,7 @@ export class TruePOSServices {
       this.seed();
     } catch (error) {
       this.close();
-      if (!isUnreadableDatabaseError(error)) throw error;
+      if (!recoverUnreadable || !isUnreadableDatabaseError(error)) throw error;
 
       this.quarantineUnreadableDatabase(dbPath);
       this.openDatabase(dbPath, key);
@@ -198,6 +232,7 @@ export class TruePOSServices {
   }
 
   close() {
+    this.xprinter.close();
     try {
       this.db?.close();
     } catch {
@@ -280,6 +315,7 @@ export class TruePOSServices {
         name TEXT NOT NULL,
         quantity REAL NOT NULL,
         unit_price REAL NOT NULL,
+        unit_cost REAL NOT NULL DEFAULT 0,
         discount REAL NOT NULL,
         vat_rate REAL NOT NULL
       );
@@ -288,6 +324,12 @@ export class TruePOSServices {
         value TEXT NOT NULL
       );
     `);
+    const saleLineColumns = this.db.pragma("table_info(sale_lines)") as Row[];
+    if (!saleLineColumns.some((column) => String(column.name) === "unit_cost")) {
+      this.db.exec("ALTER TABLE sale_lines ADD COLUMN unit_cost REAL NOT NULL DEFAULT 0");
+      this.db.exec(`UPDATE sale_lines
+        SET unit_cost = COALESCE((SELECT cost FROM products WHERE products.id = sale_lines.product_id), 0)`);
+    }
   }
 
   private seed() {
@@ -336,29 +378,51 @@ export class TruePOSServices {
     return user;
   }
 
-  async resetLoginCredentials(admin: { username?: string; password?: string }, cashier?: { username?: string; password?: string }) {
+  async resetLoginCredentials(currentAdmin: { username?: string; password?: string }, admin: { username?: string; password?: string }, cashier?: { username?: string; password?: string }) {
     if (await this.isSetupRequired()) throw new Error("Create the first admin account before resetting login information.");
+    const currentUsername = String(currentAdmin?.username ?? "").trim();
+    const currentRow = this.db.prepare("SELECT * FROM users WHERE username = ? COLLATE NOCASE AND role = 'admin'").get<Row>(currentUsername);
+    if (!currentRow || !verifyPassword(String(currentAdmin?.password ?? ""), String(currentRow.password_hash))) {
+      throw new Error("Current admin username or password is incorrect.");
+    }
     const credentials = validateLoginCredentials(admin, cashier);
-    this.replaceLoginUsers(credentials.admin, credentials.cashier);
+    const cashierRow = this.db.prepare("SELECT * FROM users WHERE role = 'cashier' ORDER BY created_at LIMIT 1").get<Row>();
+    this.db.transaction(() => {
+      this.db.prepare("UPDATE users SET username = ?, password_hash = ? WHERE id = ?")
+        .run(credentials.admin.username, hashPassword(credentials.admin.password), String(currentRow.id));
+      if (credentials.cashier) {
+        if (cashierRow) {
+          this.db.prepare("UPDATE users SET username = ?, password_hash = ? WHERE id = ?")
+            .run(credentials.cashier.username, hashPassword(credentials.cashier.password), String(cashierRow.id));
+        } else {
+          this.db.prepare("INSERT INTO users (id, username, password_hash, role, created_at) VALUES (?, ?, ?, 'cashier', ?)")
+            .run(uuid(), credentials.cashier.username, hashPassword(credentials.cashier.password), now());
+        }
+      }
+    })();
     this.currentUser = null;
-    return { adminUsername: credentials.admin.username, cashierUsername: credentials.cashier?.username ?? "" };
+    return { adminUsername: credentials.admin.username, cashierUsername: credentials.cashier?.username ?? (cashierRow ? String(cashierRow.username) : "") };
   }
 
   async createProduct(input: ProductInput) {
     this.requireAdmin();
-    const cleanedBarcode = validateCode128Value(input.barcode || input.sku);
+    const sku = String(input.sku ?? "").trim();
+    const name = String(input.name ?? "").trim();
+    if (!sku || sku.length > 64) throw new Error("SKU must be 1-64 characters.");
+    if (!name || name.length > 200) throw new Error("Product name must be 1-200 characters.");
+    const cleanedBarcode = validateCode128Value(input.barcode || sku);
     const product: Product = {
       id: uuid(),
-      sku: input.sku.trim(),
+      sku,
       barcode: cleanedBarcode,
-      name: input.name.trim(),
+      name,
       category: input.category?.trim() ?? "",
       unit: input.unit?.trim() || "pcs",
-      cost: Number(input.cost || 0),
-      price: Number(input.price || 0),
-      vatRate: Number(input.vatRate || 0),
-      stock: Number(input.stock || 0),
-      lowStockThreshold: Number(input.lowStockThreshold || 0),
+      cost: requireFiniteNumber(input.cost ?? 0, "Cost", { min: 0 }),
+      price: requireFiniteNumber(input.price ?? 0, "Price", { min: 0 }),
+      vatRate: requireFiniteNumber(input.vatRate ?? 0, "VAT rate", { min: 0, max: 100 }),
+      stock: requireFiniteNumber(input.stock ?? 0, "Opening stock", { min: 0 }),
+      lowStockThreshold: requireFiniteNumber(input.lowStockThreshold ?? 0, "Low-stock threshold", { min: 0 }),
       isActive: input.isActive ?? true,
       createdAt: now(),
       updatedAt: now()
@@ -394,7 +458,17 @@ export class TruePOSServices {
     const existing = this.db.prepare("SELECT * FROM products WHERE id = ?").get<Row>(id);
     if (!existing) throw new Error("Product not found.");
     const next = { ...productFromRow(existing), ...input, updatedAt: now() };
-    if (input.barcode || input.sku) next.barcode = validateCode128Value(next.barcode || next.sku);
+    next.sku = String(next.sku).trim();
+    next.name = String(next.name).trim();
+    next.category = String(next.category ?? "").trim();
+    next.unit = String(next.unit ?? "").trim() || "pcs";
+    if (!next.sku || next.sku.length > 64) throw new Error("SKU must be 1-64 characters.");
+    if (!next.name || next.name.length > 200) throw new Error("Product name must be 1-200 characters.");
+    next.cost = requireFiniteNumber(next.cost, "Cost", { min: 0 });
+    next.price = requireFiniteNumber(next.price, "Price", { min: 0 });
+    next.vatRate = requireFiniteNumber(next.vatRate, "VAT rate", { min: 0, max: 100 });
+    next.lowStockThreshold = requireFiniteNumber(next.lowStockThreshold, "Low-stock threshold", { min: 0 });
+    next.barcode = validateCode128Value(next.barcode || next.sku);
     this.db
       .prepare(
         `UPDATE products SET sku=?, barcode=?, name=?, category=?, unit=?, cost=?, price=?, vat_rate=?,
@@ -500,12 +574,18 @@ export class TruePOSServices {
 
   async adjustInventory(productId: string, quantity: number, note: string, type: InventoryMovement["type"] = "adjustment") {
     this.requireAdmin();
+    const delta = requireFiniteNumber(quantity, "Inventory quantity");
+    if (!(["stock_in", "stock_out", "adjustment"] as const).includes(type as "stock_in" | "stock_out" | "adjustment")) {
+      throw new Error("Invalid inventory movement type.");
+    }
     const product = this.db.prepare("SELECT * FROM products WHERE id = ?").get<Row>(productId);
     if (!product) throw new Error("Product not found.");
-    const nextStock = Number(product.stock) + quantity;
+    const nextStock = Number(product.stock) + delta;
     if (nextStock < 0) throw new Error("Stock cannot go below zero.");
-    this.db.prepare("UPDATE products SET stock = stock + ?, updated_at = ? WHERE id = ?").run(quantity, now(), productId);
-    this.addMovement(productId, type, quantity, note || "Manual adjustment");
+    this.db.transaction(() => {
+      this.db.prepare("UPDATE products SET stock = stock + ?, updated_at = ? WHERE id = ?").run(delta, now(), productId);
+      this.addMovement(productId, type, delta, String(note ?? "").trim() || "Manual adjustment");
+    })();
     return productFromRow(this.db.prepare("SELECT * FROM products WHERE id = ?").get<Row>(productId)!);
   }
 
@@ -540,14 +620,13 @@ export class TruePOSServices {
 
   async createSale(lines: CartLine[], payment: SalePayment) {
     const user = this.requireUser();
-    if (lines.length === 0) throw new Error("Sale must contain at least one product.");
-    const totals = calculateTotals(lines);
-    if (payment.amount < totals.grandTotal) throw new Error("Payment amount is below grand total.");
+    const validated = this.validateSaleInput(lines, payment);
+    const totals = calculateTotals(validated.lines);
     const sale: Sale = {
       id: uuid(),
-      receiptNo: `TP-${Date.now()}`,
-      lines,
-      payment,
+      receiptNo: `TP-${Date.now()}-${uuid().slice(0, 4).toUpperCase()}`,
+      lines: validated.lines,
+      payment: validated.payment,
       totals,
       cashierId: user.id,
       cashierName: user.username,
@@ -555,7 +634,7 @@ export class TruePOSServices {
       createdAt: now()
     };
     const tx = this.db.transaction(() => {
-      for (const line of lines) {
+      for (const line of sale.lines) {
         const product = this.db.prepare("SELECT stock FROM products WHERE id = ?").get<Row>(line.productId);
         if (!product) throw new Error(`Product not found: ${line.name}`);
         if (Number(product.stock) < line.quantity) throw new Error(`Insufficient stock for ${line.name}.`);
@@ -570,8 +649,8 @@ export class TruePOSServices {
         .run(
           sale.id,
           sale.receiptNo,
-          payment.method,
-          payment.amount,
+          sale.payment.method,
+          sale.payment.amount,
           totals.subtotal,
           totals.discountTotal,
           totals.taxableTotal,
@@ -582,14 +661,14 @@ export class TruePOSServices {
           sale.status,
           sale.createdAt
         );
-      for (const line of lines) {
+      for (const line of validated.lines) {
         this.db
           .prepare(
             `INSERT INTO sale_lines
-            (id, sale_id, product_id, sku, barcode, name, quantity, unit_price, discount, vat_rate)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            (id, sale_id, product_id, sku, barcode, name, quantity, unit_price, unit_cost, discount, vat_rate)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
           )
-          .run(uuid(), sale.id, line.productId, line.sku, line.barcode, line.name, line.quantity, line.unitPrice, line.discount, line.vatRate);
+          .run(uuid(), sale.id, line.productId, line.sku, line.barcode, line.name, line.quantity, line.unitPrice, line.unitCost, line.discount, line.vatRate);
         this.db.prepare("UPDATE products SET stock = stock - ?, updated_at = ? WHERE id = ?").run(line.quantity, now(), line.productId);
         this.addMovement(line.productId, "sale", -line.quantity, `Sale ${sale.receiptNo}`);
       }
@@ -633,20 +712,44 @@ export class TruePOSServices {
 
   async previewReceipt(lines: CartLine[], payment: SalePayment) {
     const user = this.requireUser();
-    if (lines.length === 0) throw new Error("Sale must contain at least one product.");
-    const totals = calculateTotals(lines);
+    const validated = this.validateSaleInput(lines, payment);
+    const totals = calculateTotals(validated.lines);
     const previewSale: Sale = {
       id: "preview",
       receiptNo: "Preview",
-      lines,
-      payment,
+      lines: validated.lines,
+      payment: validated.payment,
       totals,
       cashierId: user.id,
       cashierName: user.username,
       status: "completed",
       createdAt: now()
     };
-    return buildReceiptText(previewSale, await this.getSettings());
+    const settings = await this.getSettings();
+    return settings.printerMode === "xprinter"
+      ? buildReceiptHtml(previewSale, settings, { widthPx: XP365B_SAFE_RECEIPT_WIDTH_DOTS, thermal: true })
+      : buildReceiptHtml(previewSale, settings);
+  }
+
+  async searchReceipts(receiptNumber: string) {
+    this.requireUser();
+    const query = String(receiptNumber ?? "").trim();
+    if (!query) return [];
+    if (query.length > 80) throw new Error("Receipt number must not exceed 80 characters.");
+    if (!/^[a-z0-9-]+$/i.test(query)) throw new Error("Receipt number can only contain letters, numbers, and hyphens.");
+    const matches = this.db
+      .prepare("SELECT id FROM sales WHERE receipt_no LIKE ? ORDER BY created_at DESC LIMIT 20")
+      .all<Row>(`%${query}%`);
+    return matches.map((row) => this.getSale(String(row.id)));
+  }
+
+  async previewSavedReceipt(saleId: string) {
+    this.requireUser();
+    const sale = this.getSale(String(saleId ?? ""));
+    const settings = await this.getSettings();
+    return settings.printerMode === "xprinter"
+      ? buildReceiptHtml(sale, settings, { widthPx: XP365B_SAFE_RECEIPT_WIDTH_DOTS, thermal: true })
+      : buildReceiptHtml(sale, settings);
   }
 
   async getReceipt(saleId: string) {
@@ -654,24 +757,27 @@ export class TruePOSServices {
   }
 
   async getDailySales(date: string): Promise<SalesReport> {
-    const start = `${date}T00:00:00.000Z`;
-    const end = `${date}T23:59:59.999Z`;
+    return { ...(await this.getSalesSummary(date, date)), date };
+  }
+
+  async getSalesSummary(dateFrom: string, dateTo: string): Promise<SalesReport> {
+    const { start, end } = localDateRange(dateFrom, dateTo);
     const row = this.db
       .prepare(
         `SELECT COUNT(*) AS sales_count, COALESCE(SUM(subtotal),0) AS subtotal, COALESCE(SUM(discount_total),0) AS discount_total,
         COALESCE(SUM(vat_total),0) AS vat_total, COALESCE(SUM(grand_total),0) AS grand_total
-        FROM sales WHERE status = 'completed' AND created_at BETWEEN ? AND ?`
+        FROM sales WHERE status = 'completed' AND created_at >= ? AND created_at < ?`
       )
       .get<Row>(start, end)!;
     const profit = this.db
       .prepare(
-        `SELECT COALESCE(SUM((l.unit_price - p.cost) * l.quantity - (l.discount * l.quantity)), 0) AS profit
-         FROM sale_lines l JOIN sales s ON s.id = l.sale_id JOIN products p ON p.id = l.product_id
-         WHERE s.status = 'completed' AND s.created_at BETWEEN ? AND ?`
+        `SELECT COALESCE(SUM((l.unit_price - l.discount - l.unit_cost) * l.quantity), 0) AS profit
+         FROM sale_lines l JOIN sales s ON s.id = l.sale_id
+         WHERE s.status = 'completed' AND s.created_at >= ? AND s.created_at < ?`
       )
       .get<Row>(start, end)!;
     return {
-      date,
+      date: dateFrom === dateTo ? dateFrom : `${dateFrom} to ${dateTo}`,
       salesCount: Number(row.sales_count),
       subtotal: Number(row.subtotal),
       discountTotal: Number(row.discount_total),
@@ -682,14 +788,15 @@ export class TruePOSServices {
   }
 
   async getProductSales(dateFrom: string, dateTo: string): Promise<ProductSalesReport[]> {
+    const { start, end } = localDateRange(dateFrom, dateTo);
     return this.db
       .prepare(
         `SELECT l.product_id, l.sku, l.name, SUM(l.quantity) AS quantity, SUM((l.unit_price - l.discount) * l.quantity) AS revenue
          FROM sale_lines l JOIN sales s ON s.id = l.sale_id
-         WHERE s.status = 'completed' AND s.created_at BETWEEN ? AND ?
+         WHERE s.status = 'completed' AND s.created_at >= ? AND s.created_at < ?
          GROUP BY l.product_id, l.sku, l.name ORDER BY revenue DESC`
       )
-      .all<Row>(`${dateFrom}T00:00:00.000Z`, `${dateTo}T23:59:59.999Z`)
+      .all<Row>(start, end)
       .map((row) => ({
         productId: String(row.product_id),
         sku: String(row.sku),
@@ -743,17 +850,32 @@ export class TruePOSServices {
 
   async printReceipt(window: BrowserWindowType, saleId?: string) {
     const settings = await this.getSettings();
-    const text = saleId ? await this.getReceipt(saleId) : buildReceiptText(this.sampleSale(), settings);
-    const logo = settings.receipt.logoDataUrl ? `<div class="logo-wrap"><img class="logo" src="${settings.receipt.logoDataUrl}" /></div>` : "";
-    const html = `<html><head><style>${receiptStyle(settings.receipt)}</style></head><body>${logo}<pre>${escapeHtml(text)}</pre></body></html>`;
-    await this.printHtml(window, html, settings.receiptPrinter);
+    const sale = saleId ? this.getSale(saleId) : this.sampleSale();
+    if (settings.printerMode === "xprinter") {
+      if (settings.receipt.widthMm !== 80) throw new Error("XP-365B SDK receipt mode requires the 80mm paper setting.");
+      const imagePath = await this.renderXprinterReceipt(buildReceiptHtml(sale, settings, { widthPx: XP365B_SAFE_RECEIPT_WIDTH_DOTS, thermal: true }));
+      try {
+        await this.xprinter.printReceiptImage(imagePath);
+      } finally {
+        fs.rmSync(imagePath, { force: true });
+      }
+      return;
+    }
+    await this.printHtml(window, buildReceiptHtml(sale, settings), settings.receiptPrinter);
   }
 
   async printBarcode(window: BrowserWindowType, productId: string, quantity: number) {
+    const labelCount = validateLabelQuantity(quantity);
     const settings = await this.getSettings();
-    const product = productFromRow(this.db.prepare("SELECT * FROM products WHERE id = ?").get<Row>(productId)!);
+    const productRow = this.db.prepare("SELECT * FROM products WHERE id = ?").get<Row>(productId);
+    if (!productRow) throw new Error("Product not found.");
+    const product = productFromRow(productRow);
+    if (settings.printerMode === "xprinter") {
+      await this.xprinter.printLabel(product, settings.barcode, labelCount);
+      return;
+    }
     const png = await bwipjs.toBuffer({ bcid: "code128", text: product.barcode, scale: 2, height: 10, includetext: false });
-    const labels = Array.from({ length: Math.max(1, quantity) }, () => {
+    const labels = Array.from({ length: labelCount }, () => {
       return `<section class="label">
         ${settings.barcode.showName ? `<strong>${escapeHtml(product.name)}</strong>` : ""}
         <div class="barcode-box"><img src="data:image/png;base64,${png.toString("base64")}" /></div>
@@ -772,7 +894,15 @@ export class TruePOSServices {
     await this.printHtml(window, html, settings.barcodePrinter);
   }
 
+  async calibrateLabels() {
+    this.requireAdmin();
+    const settings = await this.getSettings();
+    if (settings.printerMode !== "xprinter") throw new Error("Select Xprinter XP-365B SDK mode before calibrating labels.");
+    await this.xprinter.calibrateLabels(settings.barcode);
+  }
+
   async exportEncrypted() {
+    this.requireAdmin();
     const target = dialog.showSaveDialogSync({ title: "Export encrypted TruePOS backup", defaultPath: `truepos-backup-${Date.now()}.db` });
     if (!target) throw new Error("Export cancelled.");
     await this.db.backup(target);
@@ -791,17 +921,21 @@ export class TruePOSServices {
     if (!selectedPath) throw new Error("Import cancelled.");
     if (!fs.existsSync(selectedPath)) throw new Error("Backup file not found.");
     const dbPath = path.join(dataDir(), "truepos.db");
+    if (path.resolve(selectedPath).toLowerCase() === path.resolve(dbPath).toLowerCase()) throw new Error("Select an exported backup file, not the active database.");
     const rollbackPath = path.join(dataDir(), `truepos-rollback-${Date.now()}.db`);
     this.close();
     if (fs.existsSync(dbPath)) fs.copyFileSync(dbPath, rollbackPath);
     try {
+      fs.rmSync(`${dbPath}-wal`, { force: true });
+      fs.rmSync(`${dbPath}-shm`, { force: true });
       fs.copyFileSync(selectedPath, dbPath);
-      await this.init();
+      await this.init(false);
       if (fs.existsSync(rollbackPath)) fs.rmSync(rollbackPath, { force: true });
       return selectedPath;
     } catch (error) {
+      this.close();
       if (fs.existsSync(rollbackPath)) fs.copyFileSync(rollbackPath, dbPath);
-      await this.init();
+      await this.init(false);
       throw error;
     } finally {
       if (fs.existsSync(rollbackPath)) fs.rmSync(rollbackPath, { force: true });
@@ -826,6 +960,7 @@ export class TruePOSServices {
   }
 
   async exportCsv(kind: "products" | "inventory" | "sales") {
+    this.requireAdmin();
     let rows: Row[];
     if (kind === "products") rows = this.db.prepare("SELECT * FROM products ORDER BY name").all<Row>();
     else if (kind === "inventory") rows = this.db.prepare("SELECT * FROM inventory_movements ORDER BY created_at DESC").all<Row>();
@@ -910,14 +1045,13 @@ export class TruePOSServices {
     if (this.googleDriveBackupRunning) throw new Error("Google Drive backup is already running.");
     this.googleDriveBackupRunning = true;
     const settings = await this.getSettings();
+    const backupPath = path.join(app.getPath("temp"), `truepos-drive-backup-${Date.now()}.db`);
     try {
       const clientId = this.getGoogleDriveClientId(settings);
       if (!clientId) throw new Error("Google Drive backup is not configured for this TruePOS build.");
       const accessToken = await this.refreshGoogleAccessToken(clientId);
-      const backupPath = path.join(app.getPath("temp"), `truepos-drive-backup-${Date.now()}.db`);
       await this.db.backup(backupPath);
       const uploaded = await this.uploadFileToGoogleDrive(accessToken, backupPath);
-      fs.rmSync(backupPath, { force: true });
       const next = mergeSettings({
         ...settings,
         googleDrive: {
@@ -940,6 +1074,7 @@ export class TruePOSServices {
       this.saveSettings(next);
       throw error;
     } finally {
+      fs.rmSync(backupPath, { force: true });
       this.googleDriveBackupRunning = false;
     }
   }
@@ -961,7 +1096,9 @@ export class TruePOSServices {
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body
     });
-    if (!response.ok) throw new Error(`Google token exchange failed: ${await response.text()}`);
+    if (!response.ok) {
+      throw new Error("Google Drive authorization could not be completed. Reconnect Google Drive and try again.");
+    }
     return response.json() as Promise<{ access_token: string; refresh_token?: string }>;
   }
 
@@ -977,7 +1114,9 @@ export class TruePOSServices {
         grant_type: "refresh_token"
       })
     });
-    if (!response.ok) throw new Error(`Google token refresh failed: ${await response.text()}`);
+    if (!response.ok) {
+      throw new Error("The Google Drive connection has expired. Reconnect Google Drive and try again.");
+    }
     const token = (await response.json()) as { access_token: string };
     return token.access_token;
   }
@@ -1011,7 +1150,9 @@ export class TruePOSServices {
       },
       body
     });
-    if (!response.ok) throw new Error(`Google Drive upload failed: ${await response.text()}`);
+    if (!response.ok) {
+      throw new Error("The backup could not be uploaded to Google Drive. Check the internet connection and available Drive storage, then try again.");
+    }
     return response.json() as Promise<{ id: string; name: string }>;
   }
 
@@ -1024,6 +1165,50 @@ export class TruePOSServices {
       note,
       now()
     );
+  }
+
+  private validateSaleInput(lines: CartLine[], payment: SalePayment) {
+    if (!Array.isArray(lines) || lines.length === 0) throw new Error("Sale must contain at least one product.");
+    if (!payment || !(["cash", "card", "mobile"] as const).includes(payment.method)) throw new Error("Invalid payment method.");
+    const amount = money(requireFiniteNumber(payment.amount, "Paid amount", { min: 0, max: 1_000_000_000 }));
+    const normalized = new Map<string, CartLine & { unitCost: number }>();
+
+    for (const input of lines) {
+      const productId = String(input?.productId ?? "").trim();
+      if (!productId) throw new Error("A sale line is missing its product.");
+      const quantity = requireFiniteNumber(input.quantity, "Sale quantity", { min: Number.EPSILON, max: 1_000_000 });
+      const discount = money(requireFiniteNumber(input.discount, "Line discount", { min: 0, max: 1_000_000_000 }));
+      const productRow = this.db.prepare("SELECT * FROM products WHERE id = ?").get<Row>(productId);
+      if (!productRow) throw new Error(`Product not found: ${input.name || productId}`);
+      const product = productFromRow(productRow);
+      if (!product.isActive) throw new Error(`${product.name} is inactive and cannot be sold.`);
+      if (discount > product.price) throw new Error(`Discount cannot exceed the unit price for ${product.name}.`);
+
+      const existing = normalized.get(productId);
+      if (existing) {
+        if (existing.discount !== discount) throw new Error(`${product.name} appears more than once with different discounts.`);
+        existing.quantity = requireFiniteNumber(existing.quantity + quantity, `Total quantity for ${product.name}`, { max: 1_000_000 });
+      } else {
+        normalized.set(productId, {
+          productId: product.id,
+          sku: product.sku,
+          barcode: product.barcode,
+          name: product.name,
+          quantity,
+          unitPrice: product.price,
+          unitCost: product.cost,
+          discount,
+          vatRate: product.vatRate
+        });
+      }
+    }
+
+    for (const line of normalized.values()) {
+      const stock = Number(this.db.prepare("SELECT stock FROM products WHERE id = ?").get<Row>(line.productId)?.stock);
+      if (!Number.isFinite(stock) || stock < line.quantity) throw new Error(`Insufficient stock for ${line.name}.`);
+    }
+
+    return { lines: [...normalized.values()], payment: { method: payment.method, amount } as SalePayment };
   }
 
   private getSale(saleId: string): Sale {
@@ -1085,6 +1270,42 @@ export class TruePOSServices {
       });
     } finally {
       if (!printWindow.isDestroyed()) printWindow.close();
+    }
+  }
+
+  private async renderXprinterReceipt(html: string) {
+    const width = XP365B_SAFE_RECEIPT_WIDTH_DOTS;
+    const renderWindow = new BrowserWindow({
+      show: false,
+      width,
+      height: 800,
+      useContentSize: true,
+      backgroundColor: "#ffffff",
+      webPreferences: { sandbox: true }
+    });
+    const target = path.join(app.getPath("temp"), `truepos-xp365b-receipt-${uuid()}.png`);
+    try {
+      await renderWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+      await renderWindow.webContents.executeJavaScript("Promise.all(Array.from(document.images).map((image) => image.complete ? Promise.resolve() : new Promise((resolve) => { image.onload = resolve; image.onerror = resolve; })))");
+      const height = await renderWindow.webContents.executeJavaScript("Math.ceil(Math.max(document.body.scrollHeight, document.documentElement.scrollHeight))") as number;
+      if (!Number.isFinite(height) || height < 1 || height > 30000) throw new Error("Receipt is too long to render safely.");
+      renderWindow.setContentSize(width, height);
+      await renderWindow.webContents.executeJavaScript("new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
+      const captured = await renderWindow.webContents.capturePage({ x: 0, y: 0, width, height });
+      const exact = captured.getSize().width === width ? captured : captured.resize({ width, quality: "best" });
+      const exactSize = exact.getSize();
+      const monochrome = nativeImage.createFromBitmap(Buffer.from(makeReceiptBitmapMonochrome(exact.toBitmap())), {
+        width: exactSize.width,
+        height: exactSize.height,
+        scaleFactor: 1
+      });
+      fs.writeFileSync(target, monochrome.toPNG());
+      return target;
+    } catch (error) {
+      fs.rmSync(target, { force: true });
+      throw error;
+    } finally {
+      if (!renderWindow.isDestroyed()) renderWindow.close();
     }
   }
 
@@ -1183,7 +1404,7 @@ function waitForGoogleOAuthCode(clientId: string, state: string, challenge: stri
       } else if (error) {
         response.writeHead(400, { "Content-Type": "text/html" });
         response.end(`<h2>TruePOS Google Drive connection failed</h2><p>${escapeHtml(error)}</p>`);
-        finish(new Error(`Google OAuth failed: ${error}`));
+        finish(new Error("Google Drive authorization was cancelled or could not be completed. Please try connecting again."));
       } else if (code) {
         response.writeHead(200, { "Content-Type": "text/html" });
         response.end("<h2>TruePOS Google Drive connected</h2><p>You can close this browser tab and return to TruePOS.</p>");

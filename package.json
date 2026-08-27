@@ -1,6 +1,6 @@
 {
   "name": "truepos",
-  "version": "0.1.22",
+  "version": "0.1.23",
   "description": "TruePOS offline desktop point of sale",
   "main": "dist-electron/electron/main.js",
   "author": "TruePOS",
@@ -19,11 +19,12 @@
     "bwip-js": "^4.7.0",
     "dayjs": "^1.11.13",
     "keytar": "^7.9.0",
+    "koffi": "^3.1.5",
     "lucide-react": "^0.468.0",
     "papaparse": "^5.5.3",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "uuid": "^10.0.0",
+    "uuid": "^14.0.2",
     "zod": "^3.25.76"
   },
   "devDependencies": {
@@ -31,11 +32,10 @@
     "@types/papaparse": "^5.3.15",
     "@types/react": "^18.3.23",
     "@types/react-dom": "^18.3.7",
-    "@types/uuid": "^10.0.0",
     "@vitejs/plugin-react": "^4.7.0",
     "concurrently": "^9.2.0",
     "cross-env": "^7.0.3",
-    "electron": "^37.2.1",
+    "electron": "^44.0.0",
     "electron-builder": "^26.0.12",
     "typescript": "^5.8.3",
     "vite": "^7.0.4",
@@ -60,6 +60,21 @@
       {
         "from": "build/icon.png",
         "to": "icon.png"
+      },
+      {
+        "from": "vendor/xprinter",
+        "to": "xprinter",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "vendor/xprinter-driver",
+        "to": "xprinter-driver",
+        "filter": [
+          "Xprinter_2024.2_M-1.exe",
+          "README.md"
+        ]
       },
       {
         "from": "build/google-drive-oauth.json",
