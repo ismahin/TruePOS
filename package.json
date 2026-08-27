@@ -1,6 +1,6 @@
 {
   "name": "truepos",
-  "version": "0.1.25",
+  "version": "0.1.26",
   "description": "TruePOS offline desktop point of sale",
   "main": "dist-electron/electron/main.js",
   "author": "TruePOS",
@@ -78,12 +78,15 @@
         ]
       },
       {
-        "from": "vendor/xprinter-driver",
+        "from": "vendor/xprinter-driver/runtime",
         "to": "xprinter-driver",
         "filter": [
-          "Xprinter_2024.2_M-1.exe",
-          "README.md"
+          "**/*"
         ]
+      },
+      {
+        "from": "vendor/xprinter-driver/README.md",
+        "to": "xprinter-driver/README.md"
       },
       {
         "from": "build/google-drive-oauth.json",

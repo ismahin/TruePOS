@@ -208,6 +208,7 @@ export type PrintingApi = {
   testBarcode(productId: string): Promise<void>;
   printBarcode(productId: string, quantity: number): Promise<void>;
   calibrateLabels(): Promise<void>;
+  installXprinterDriver(): Promise<void>;
 };
 
 export type SettingsApi = {

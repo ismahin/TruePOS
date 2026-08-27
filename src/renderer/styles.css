@@ -1370,6 +1370,17 @@ th {
   font-size: 18px;
 }
 
+.driver-setup-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.driver-setup-notice .secondary {
+  flex: 0 0 auto;
+}
+
 .update-progress {
   height: 10px;
   overflow: hidden;
@@ -1701,5 +1712,10 @@ th {
 
   .factory-reset-box {
     display: grid;
+  }
+
+  .driver-setup-notice {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }

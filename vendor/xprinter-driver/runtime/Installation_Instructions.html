@@ -1,0 +1,127 @@
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+<title>Installing Windows Printer Drivers</title>
+<meta http-equiv="Content-Type" content="text/html; charset=windows-1252" />
+<style type="text/css">
+a:link { color: black; font-weight:bold; text-decoration:underline; text-underline:single; }
+a:visited { color:black; font-weight:bold; text-decoration:underline; text-underline:single; }
+a:hover { color:#009999; font-weight:bold; text-decoration:underline; text-underline:single; }
+body { font-size:10.0pt; font-family:"Arial"; }
+h1 { margin-top:12.0pt; margin-right:0in; margin-bottom:6.0pt; margin-left:0in; font-size:18.0pt; font-family:"Tahoma,Arial"; color:#009999; }
+h2 { margin-top:18.0pt; margin-right:0in; margin-bottom:3.0pt; margin-left:0in; font-size:12.0pt; font-family:"Arial"; }
+p { font-size:10.0pt; font-family:"Arial"; }
+p.contents { margin-top:8.0pt; margin-right:0in; margin-bottom:0pt; margin-left:.5in; }
+li { margin-bottom:8.0pt; }
+p.i1 { margin-left:.5in; }
+ol.i1 { margin-left:0.5in; }
+ul.contents li { margin-bottom: 4.0pt; }
+span.fixed { font-size:14.0pt; font-weight: bold; font-family: "Courier New"; }
+</style>
+</head>
+
+<body>
+<h1>Installing Windows Printer Drivers</h1>
+
+<h2>Contents</h2>
+<ul class='contents'>
+<li><a href="#Introduction">Introduction</a></li>
+<li><a href="#Installation">Installing Printer Drivers</a></li>
+<li><a href="#TLS">Installing the Seagull Scientific Port Monitor</a></li>
+<li><a href="#Upgrade">Upgrading Printer Drivers</a></li>
+<li><a href="#Remove">Removing Printer Drivers</a></li>
+<li><a href="#Troubleshooting">Troubleshooting Printing Problems</a></li>
+</ul>
+
+<h2><a name="Introduction">Introduction</a></h2>
+<p>
+    This document will help you install and update your Windows printer drivers. 
+    After they are installed or updated, you can refer to the help file that is included with the drivers for answers
+    to the most commonly asked questions. The help file also includes a thorough troubleshooting section.
+</p><p>To access the help file, in Windows 10, right-click the printer on the <b>Devices and Printers</b> page, and then click 
+<b>Printer properties</b> or <b>Printing preferences</b>. Click <b>Help</b> in the bottom-right corner of the dialog. </p>
+
+<p>
+    The drivers include the Seagull Driver wizard, which you can use to install, remove, and upgrade
+    drivers. We strongly recommend that you use the Seagull Driver wizard, because
+    the standard Windows Add a Device wizard does not always upgrade existing drivers correctly.
+</p>
+
+<h2><a name="Installation">Installing Printer Drivers</a></h2>
+<ol class="i1">
+    <li>Turn off the printer, connect the appropriate cable, and then turn on the printer.</li>
+    <li>If the printer supports the Plug and Play functionality and if you have connected it by using a USB or parallel
+    cable, then the Windows Add a Device wizard automatically detects the printer and displays
+    a dialog that prompts you to install a driver. Click <b>Cancel</b> and do not install the driver by using this wizard.</li>
+    <li>In Windows Explorer, browse to the installation directory where the driver files are located, and then double-click the DriverWizard.exe utility.</li>
+    <li>Click to select <b>Install printer drivers</b>, and then click <b>Next</b>.</li>
+    <li>Click to select the connection type, and then click <b>Next</b>.</li>
+	<li>Configure the printer settings according to the steps in the wizard.</li>
+</ol><p><b>Note:</b> During installation, you might receive a message that the
+driver is not digitally signed and may not be compatible with your operating
+system. You can safely ignore this message. This driver has been tested thoroughly with all current versions
+of Windows.</p>
+
+<h2><a name="TLS">Installing the Seagull Scientific Port Monitor</a> </h2>
+<p>Some printer models support Transport Layer Security (TLS) encrypted communication. The drivers for these models include the Seagull
+Scientific Port Monitor, which you can use to access and configure the TLS settings. You can install the Seagull Scientific Port Monitor by using 
+the Seagull Driver wizard or by using Windows Control Panel.</p>
+
+<p>To install the monitor by using the Seagull Driver wizard, follow these steps:</p>
+<ol>
+    <li>On the <b>Install Components</b> page of the wizard, select the <b>Seagull Scientific Port</b> checkbox, and then click <b>Next</b>.
+	<p><b>Note</b>: This component is available only for printers that support TLS or that use non-standard port numbers.</p></li>
+    <li>On the <b>Specify Port</b> page, click <b>Create Port</b>.</li>
+	<li>In the <b>Create Port</b> dialog, select <b>Seagull Scientific Port</b>, and then click <b>New Port</b>.</li>
+    <li>In the <b>Add Port</b> dialog, enter a name for the port, and then click <b>OK</b>.</li>
+    <li>In the <b>Configure Port</b> dialog, enter a name or IP address for the printer, enter a port number, select 
+	<b>Enable Transport Layer Security Protocol (TLS)</b>, and then click <b>OK</b>.</li>
+    <li>Configure the other printer settings according to the steps in the wizard.</li>
+</ol>
+
+<p>To install the monitor by using Control Panel, follow these steps:</p>
+<ol>
+    <li>Download and unpack the Seagull driver for the printer that you want. </li>
+	<li>On the <b>Devices and Printers</b> page of Control Panel, select any printer, and then click <b>Print server properties</b>.</li>
+    <li>On the <b>Ports</b> tab of the <b>Print Server Properties</b> dialog, click <b>Change Port Settings</b>.</li>
+    <li>Click <b>Add Port</b>.</li>
+    <li>In the <b>Printer Ports</b> dialog, click <b>New Port Type</b>.</li>
+    <li>In the <b>Installing Port Monitor</b> dialog, click <b>Browse</b>. </li>
+	<li>In the <b>Locate File</b> dialog, locate and then open the printer's .inf configuration file, which includes the Seagull Scientific 
+	Port Monitor information. </li>
+	<li>In the <b>Installing Port Monitor</b> dialog, click <b>OK</b>. </li>
+	<li>In the <b>Printer Ports</b> dialog, select <b>Seagull Scientific Port</b>, and then click <b>New Port</b>.</li>
+	<li>In the <b>Add Port</b> dialog, enter a name for the port, and then click <b>OK</b>.</li>
+	<li>In the <b>Configure Port</b> dialog, enter a name or IP address for the printer, enter a port number, and then click <b>OK</b>.</li>
+	<li>Close the <b>Printer Ports</b> dialog and the <b>Print Server Properties</b> page. </li>
+</ol>
+<p>After you install the Seagull Scientific Port Monitor, you can access your TLS port on the <b>Ports</b> tab of the printer properties page. Use this tab to 
+add, delete, or configure a port.</p>
+
+<h2><a name="Upgrade">Upgrading Printer Drivers</a></h2>
+<p>We recommend that you use the Seagull Driver wizard to upgrade existing drivers when they become outdated. Upgrading instead of removing helps to ensure that your driver settings remain intact.
+ Using the Windows Add a Device wizard to upgrade existing drivers is not recommended because this wizard might not upgrade all
+driver files correctly, which could leave the driver in a corrupted state. </p>
+<ol class="i1">
+    <li>In Windows Explorer, browse to the installation directory where the driver files are located, and then double-click the DriverWizard.exe utility.</li>
+    <li>Click to select <b>Upgrade printer drivers</b>, and then click <b>Next</b>.</li>
+	<li>Click to select the printers whose drivers you want to upgrade, and then click <b>Next</b>.</li>
+	<li>Click <b>Finish</b>.</li>
+</ol> 
+
+<h2><a name="Remove">Removing Printer Drivers</a></h2>
+<p>You can use the Seagull Driver wizard to remove printer drivers from the system. To do this, follow these steps:
+<ol class="i1">
+<li>In the installation directory where the driver files are located, double-click the DriverWizard.exe utility.</li>
+<li>Click to select <b>Remove printer drivers</b>, and then click <b>Next</b>.</li>
+<li>Click to select the removal method that you want, and then click <b>Next</b>.</li>
+<li>Verify the items to be removed, click <b>Next</b>, and then click <b>Finish</b>. </li>
+</ol>
+
+<h2><a name="Troubleshooting">Troubleshooting Printing Problems</a></h2>
+<p>The help file that is included with the printer driver includes a <i>Technical Support</i>
+section, which contains a sub-section called <i>Troubleshooting Printing
+Problems</i>. This section lists critical settings to check and several printing tests that will usually resolve any problems that may occur. </p>
+<p>To access the help file, in Windows 10, right-click the printer on the <b>Devices and Printers</b> page, and then click <b>Printer properties</b> or <b>Printing preferences</b>. Click <b>Help</b> in the bottom-right corner of the dialog. </p>
+
+</body>
+</html>

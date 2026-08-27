@@ -901,6 +901,18 @@ export class TruePOSServices {
     await this.xprinter.calibrateLabels(settings.barcode);
   }
 
+  async installXprinterDriver() {
+    this.requireAdmin();
+    const driverPath = app.isPackaged
+      ? path.join(process.resourcesPath, "xprinter-driver", "DriverWizard.exe")
+      : path.join(process.cwd(), "vendor", "xprinter-driver", "runtime", "DriverWizard.exe");
+    if (!fs.existsSync(driverPath)) {
+      throw new Error("The Xprinter DriverWizard files are missing. Install the latest TruePOS release and try again.");
+    }
+    const result = await shell.openPath(driverPath);
+    if (result) throw new Error("Windows could not open the Xprinter DriverWizard.");
+  }
+
   async exportEncrypted() {
     this.requireAdmin();
     const target = dialog.showSaveDialogSync({ title: "Export encrypted TruePOS backup", defaultPath: `truepos-backup-${Date.now()}.db` });

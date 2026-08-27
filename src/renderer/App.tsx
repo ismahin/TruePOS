@@ -2584,6 +2584,15 @@ function SettingsScreen({ user, notify, updateState, onFactoryReset }: { user: U
     }
   };
 
+  const installXprinterDriver = async () => {
+    try {
+      await api.printing.installXprinterDriver();
+      notify("Xprinter DriverWizard opened. Complete the steps shown in the wizard.");
+    } catch (err) {
+      notify(friendlyErrorMessage(err, "The Xprinter DriverWizard could not be opened. Install the latest TruePOS release and try again."), "error");
+    }
+  };
+
   return (
     <section className="screen settings-screen">
       {user.role !== "admin" && <div className="notice">Admin permission is required to update settings.</div>}
@@ -2659,7 +2668,14 @@ function SettingsScreen({ user, notify, updateState, onFactoryReset }: { user: U
                 ))}
               </select>
             </label>
-            {settings.printerMode === "xprinter" && <div className="notice neutral">SDK mode connects directly to the fixed XP-365B over USB. Windows printer selection and page scaling are bypassed.</div>}
+            {settings.printerMode === "xprinter" && (
+              <div className="notice neutral driver-setup-notice">
+                <span>SDK mode connects directly to the fixed XP-365B over USB. Windows printer selection and page scaling are bypassed.</span>
+                <button className="secondary compact" disabled={user.role !== "admin"} onClick={installXprinterDriver}>
+                  Install / Repair Xprinter Driver
+                </button>
+              </div>
+            )}
             <div className="form-section">
               <label>
                 Paper width

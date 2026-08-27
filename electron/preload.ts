@@ -46,7 +46,8 @@ const api: TruePOSApi = {
     printReceipt: (saleId) => invoke("printing:printReceipt", saleId),
     testBarcode: (productId) => invoke("printing:testBarcode", productId),
     printBarcode: (productId, quantity) => invoke("printing:printBarcode", productId, quantity),
-    calibrateLabels: () => invoke("printing:calibrateLabels")
+    calibrateLabels: () => invoke("printing:calibrateLabels"),
+    installXprinterDriver: () => invoke("printing:installXprinterDriver")
   },
   settings: {
     get: () => invoke("settings:get"),

@@ -73,6 +73,7 @@ function registerIpc() {
   ipcMain.handle("printing:testBarcode", (_event, productId) => services.printBarcode(assertWindow(), productId, 1));
   ipcMain.handle("printing:printBarcode", (_event, productId, quantity) => services.printBarcode(assertWindow(), productId, quantity));
   ipcMain.handle("printing:calibrateLabels", () => services.calibrateLabels());
+  ipcMain.handle("printing:installXprinterDriver", () => services.installXprinterDriver());
 
   ipcMain.handle("settings:get", () => services.getSettings());
   ipcMain.handle("settings:update", (_event, settings) => services.updateSettings(settings));

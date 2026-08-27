@@ -1,0 +1,60 @@
+<driver version='6.6'>
+
+<stock>
+Name=2 x 4
+Data=WkxJQhwAAAAYAAAAeJwrOMbA8KCHkeEbCwMYwwCICQBmGASc
+</stock>
+
+<stock>
+Name=4 x 4
+Data=WkxJQhwAAAAWAAAAeJx70MPI8ACIv7EwgDEMgJgAbFQE0w==
+</stock>
+
+<stock>
+Name=4 x 6
+Data=WkxJQhwAAAAYAAAAeJx70MPIEBDMxPCNhQGMYQDEBABZywQL
+</stock>
+
+<stock>
+Name=兄弟腕带（Brother wristband）
+Data=WkxJQhwAAAAaAAAAeJwzKGVgWOHPzPCNhQGMYYCFgZURAEwJA54=
+Type=Die Cut
+</stock>
+
+<stock>
+Name=小标签（Small label）
+Data=WkxJQhwAAAAZAAAAeJwLOMzAYFDKwPCNBYJhgIWBnREAT68DuQ==
+Type=Die Cut
+</stock>
+
+<stock>
+Name=通用标签（Generalized label）
+Data=WkxJQhwAAAAZAAAAeJxLeMXA4DCHgeEbCwTDAAsDJyMAWpEEKQ==
+Type=Die Cut
+</stock>
+
+<stock>
+Name=通用腕带（Universal wristband）
+Data=WkxJQhwAAAAaAAAAeJwzKGVgmHCBmeEbCwMYwwALAxsjAFViBAg=
+Type=Die Cut
+</stock>
+
+<stock>
+Name=长标签（Long label）
+Data=WkxJQhwAAAAaAAAAeJw7cIuBwcGJn+EbCwMYwwALAwcjAFyTBC0=
+Type=Die Cut
+</stock>
+
+<stock>
+Name=默认腕带（Default Wrist Strap）
+Data=WkxJQhwAAAAaAAAAeJwzKGVgOODKwvCNhQGMYYCFgYURAE13A6w=
+Type=Die Cut
+</stock>
+
+<font type='Bar Code'>
+Name=Sample Bar Code Font
+Data=WkxJQqgAAABAAAAAeJybwMgABgoaZgbBibkFOakKTolFCs75KakKbvl5JQxIAKTUEEQoMKQwoIEYdAEkwA4m2TDEGfHoQQcAOGsJSg==
+</font>
+
+</driver>
+

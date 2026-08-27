@@ -8,6 +8,6 @@
 - Authenticode status when added: Valid
 - SHA-256: `A34A29329AEC98FEED78CE82B07270B432C2E80C906C6AB5E6E1C9B52C3B8E27`
 
-The TruePOS NSIS installer first creates its temporary driver directory and extracts this package with Seagull's documented `/x <directory>` option. After verifying the extraction, it starts the extracted official `DriverWizard.exe` as a separate step.
+The source package is extracted at build time into `runtime/`. TruePOS bundles those verified runtime files and starts the official `DriverWizard.exe` directly, avoiding installer-time command-line extraction and path parsing. Silent in-app TruePOS updates keep the existing printer driver and skip DriverWizard; administrators can open it later from **Settings > Install / Repair Xprinter Driver**.
 
 Before distributing TruePOS outside your organization, confirm that your Xprinter/Seagull agreement permits redistribution of this package.
