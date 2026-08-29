@@ -1,6 +1,6 @@
 {
   "name": "truepos",
-  "version": "0.1.28",
+  "version": "0.1.30",
   "description": "TruePOS offline desktop point of sale",
   "main": "dist-electron/electron/main.js",
   "author": "TruePOS",
@@ -15,6 +15,7 @@
     "postinstall": "electron-builder install-app-deps"
   },
   "dependencies": {
+    "@fontsource/ibm-plex-sans": "^5.3.0",
     "better-sqlite3-multiple-ciphers": "^12.11.1",
     "bwip-js": "^4.7.0",
     "dayjs": "^1.11.13",

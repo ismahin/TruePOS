@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildReceiptHtml, buildReceiptText, calculatePaymentBalance, calculateTotals, validateCode128Value } from "./pos.js";
+import { buildReceiptHtml, buildReceiptText, calculatePaymentBalance, calculateTotals, roundCashUp, validateCode128Value } from "./pos.js";
 import type { AppSettings, Sale } from "./contracts.js";
 
 describe("POS calculations", () => {
@@ -19,11 +19,39 @@ describe("POS calculations", () => {
 
     expect(totals).toEqual({
       subtotal: 200,
+      itemDiscountTotal: 10,
+      billDiscountTotal: 0,
       discountTotal: 10,
       taxableTotal: 190,
       vatTotal: 28.5,
       grandTotal: 218.5
     });
+  });
+
+  it("applies a whole-bill discount to the payable total", () => {
+    const lines = [
+      {
+        productId: "p1",
+        sku: "SKU-1",
+        barcode: "SKU-1",
+        name: "Rice",
+        quantity: 2,
+        unitPrice: 100,
+        discount: 5,
+        vatRate: 15
+      }
+    ];
+    expect(calculateTotals(lines, 8.5)).toEqual({
+      subtotal: 200,
+      itemDiscountTotal: 10,
+      billDiscountTotal: 8.5,
+      discountTotal: 18.5,
+      taxableTotal: 190,
+      vatTotal: 28.5,
+      grandTotal: 210
+    });
+    expect(calculateTotals(lines, 999).grandTotal).toBe(0);
+    expect(calculateTotals(lines, -5)).toEqual(calculateTotals(lines));
   });
 
   it("rejects invalid Code128 values", () => {
@@ -37,6 +65,14 @@ describe("POS calculations", () => {
     expect(calculatePaymentBalance(218.5, 250)).toEqual({ due: 0, change: 31.5 });
   });
 
+  it("rounds cash tender up to the next convenient note", () => {
+    expect(roundCashUp(0)).toBe(0);
+    expect(roundCashUp(787.5)).toBe(790);
+    expect(roundCashUp(790)).toBe(790);
+    expect(roundCashUp(791)).toBe(795);
+    expect(roundCashUp(218.5, 1)).toBe(219);
+  });
+
   it("prints the outstanding due on an unpaid receipt", () => {
     const sale: Sale = {
       id: "sale-1",
@@ -46,6 +82,8 @@ describe("POS calculations", () => {
       totals: calculateTotals([{ productId: "p1", sku: "SKU-1", barcode: "SKU-1", name: "Rice", quantity: 1, unitPrice: 100, discount: 0, vatRate: 0 }]),
       cashierId: "u1",
       cashierName: "cashier",
+      customerName: "",
+      customerPhone: "",
       status: "completed",
       createdAt: "2026-08-24T12:00:00.000Z"
     };
@@ -71,6 +109,8 @@ describe("POS calculations", () => {
       totals: calculateTotals(lines),
       cashierId: "u1",
       cashierName: "cashier",
+      customerName: "Rahim",
+      customerPhone: "01712345678",
       status: "completed",
       createdAt: "2026-08-24T12:00:00.000Z"
     };

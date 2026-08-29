@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain } from "electron";
+import { app, BrowserWindow, ipcMain, Menu } from "electron";
 import type { BrowserWindow as BrowserWindowType } from "electron";
 import path from "node:path";
 import { TruePOSServices } from "./services.js";
@@ -10,6 +10,15 @@ let mainWindow: BrowserWindowType | null = null;
 const appIconPath = app.isPackaged ? path.join(process.resourcesPath, "icon.png") : path.join(__dirname, "../../build/icon.png");
 
 app.setAppUserModelId("com.truepos.desktop");
+// Must run before any BrowserWindow is created or Windows keeps the default File/Edit/View/Window bar.
+Menu.setApplicationMenu(null);
+
+function stripWindowMenu(window: BrowserWindowType) {
+  window.setMenu(null);
+  window.removeMenu();
+  window.setMenuBarVisibility(false);
+  window.setAutoHideMenuBar(true);
+}
 
 async function createWindow() {
   mainWindow = new BrowserWindow({
@@ -20,6 +29,7 @@ async function createWindow() {
     title: "TruePOS",
     icon: appIconPath,
     backgroundColor: "#ffffff",
+    autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
@@ -28,11 +38,16 @@ async function createWindow() {
     }
   });
 
+  stripWindowMenu(mainWindow);
+  mainWindow.on("page-title-updated", () => stripWindowMenu(mainWindow!));
+
   if (process.env.VITE_DEV_SERVER_URL) {
     await mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL);
   } else {
     await mainWindow.loadFile(path.join(__dirname, "../../dist/index.html"));
   }
+
+  stripWindowMenu(mainWindow);
 }
 
 function registerIpc() {
@@ -46,6 +61,7 @@ function registerIpc() {
   ipcMain.handle("products:create", (_event, input) => services.createProduct(input));
   ipcMain.handle("products:update", (_event, id, input) => services.updateProduct(id, input));
   ipcMain.handle("products:delete", (_event, id) => services.deleteProduct(id));
+  ipcMain.handle("products:deleteAll", () => services.deleteAllProducts());
   ipcMain.handle("products:search", (_event, query) => services.searchProducts(query));
   ipcMain.handle("products:list", (_event, params) => services.listProducts(params));
   ipcMain.handle("products:importCsv", (_event, csv) => services.importProductsCsv(csv));
@@ -54,16 +70,22 @@ function registerIpc() {
   ipcMain.handle("inventory:listMovements", (_event, productId) => services.listMovements(productId));
   ipcMain.handle("inventory:getStock", (_event, productId) => services.getStock(productId));
 
-  ipcMain.handle("sales:createAndPrintSale", (_event, lines, payment) => services.createAndPrintSale(assertWindow(), lines, payment));
+  ipcMain.handle("sales:createAndPrintSale", (_event, lines, payment, billDiscount, customer, reservedStockByProductId) =>
+    services.createAndPrintSale(assertWindow(), lines, payment, billDiscount, customer, reservedStockByProductId)
+  );
   ipcMain.handle("sales:returnSale", (_event, saleId) => services.returnSale(saleId));
   ipcMain.handle("sales:cancelSale", (_event, saleId) => services.cancelSale(saleId));
-  ipcMain.handle("sales:previewReceipt", (_event, lines, payment) => services.previewReceipt(lines, payment));
-  ipcMain.handle("sales:searchReceipts", (_event, receiptNumber) => services.searchReceipts(receiptNumber));
+  ipcMain.handle("sales:previewReceipt", (_event, lines, payment, billDiscount, customer) =>
+    services.previewReceipt(lines, payment, billDiscount, customer)
+  );
+  ipcMain.handle("sales:searchReceipts", (_event, query) => services.searchReceipts(query));
+  ipcMain.handle("sales:listSalesForDate", (_event, date, limit) => services.listSalesForDate(date, limit));
   ipcMain.handle("sales:previewSavedReceipt", (_event, saleId) => services.previewSavedReceipt(saleId));
   ipcMain.handle("sales:getReceipt", (_event, saleId) => services.getReceipt(saleId));
 
   ipcMain.handle("reports:getDailySales", (_event, date) => services.getDailySales(date));
   ipcMain.handle("reports:getSalesSummary", (_event, dateFrom, dateTo) => services.getSalesSummary(dateFrom, dateTo));
+  ipcMain.handle("reports:getSalesTrend", (_event, dateFrom, dateTo) => services.getSalesTrend(dateFrom, dateTo));
   ipcMain.handle("reports:getProductSales", (_event, dateFrom, dateTo) => services.getProductSales(dateFrom, dateTo));
   ipcMain.handle("reports:getInventoryValue", () => services.getInventoryValue());
 
@@ -98,10 +120,13 @@ function assertWindow() {
 }
 
 app.whenReady().then(async () => {
+  Menu.setApplicationMenu(null);
   await services.init();
   services.startGoogleDriveAutoBackupScheduler();
   registerIpc();
   await createWindow();
+  Menu.setApplicationMenu(null);
+  if (mainWindow) stripWindowMenu(mainWindow);
   updater.start(assertWindow());
 });
 
