@@ -674,6 +674,17 @@ export class TruePOSServices {
     return { adminUsername: credentials.admin.username, cashierUsername: credentials.cashier?.username ?? (cashierRow ? String(cashierRow.username) : "") };
   }
 
+  async resetAllLoginCredentials() {
+    const removedUsers = this.db.prepare("SELECT COUNT(*) AS count FROM users").get<{ count: number }>()?.count ?? 0;
+    this.db.transaction(() => {
+      this.db.prepare("DELETE FROM users").run();
+      this.db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)")
+        .run("last-login-recovery", now());
+    })();
+    this.currentUser = null;
+    return { removedUsers };
+  }
+
   async createProduct(input: ProductInput) {
     this.requireAdmin();
     const sku = String(input.sku ?? "").trim();

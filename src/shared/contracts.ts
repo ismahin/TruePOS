@@ -187,6 +187,7 @@ export type AuthApi = {
   isSetupRequired(): Promise<boolean>;
   setupInitialAdmin(username: string, password: string, cashier?: { username: string; password: string }): Promise<User>;
   resetLoginCredentials(currentAdmin: { username: string; password: string }, admin: { username: string; password: string }, cashier?: { username: string; password: string }): Promise<{ adminUsername: string; cashierUsername: string }>;
+  resetAllLoginCredentials(): Promise<{ removedUsers: number }>;
 };
 
 export type ProductApi = {

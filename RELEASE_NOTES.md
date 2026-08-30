@@ -1,16 +1,13 @@
-# TruePOS v0.1.33
+# TruePOS v0.1.34
 
-## Reliable form controls
+## Login recovery
 
-- Fixed a Settings race condition where delayed logo, save, print-test, calibration, or backup responses could restore older values.
-- New edits now always win over outdated asynchronous responses.
-- Google Drive connection and backup status can update without reverting newer backup schedule changes.
-- Removed disabled states from all input, select, textarea, checkbox, and range controls throughout the renderer.
-- Xprinter-fixed values now appear as clear informational fields instead of disabled controls.
-- Product code fields remain deliberately read-only because SKU and barcode values are assigned automatically; they are never disabled.
+- Added **Forgot passwords? Reset all logins** to the login page.
+- Admin and cashier credentials can now be reset without knowing the old password.
+- Two explicit confirmations protect against accidental account removal.
+- After recovery, TruePOS opens credential setup so a new admin and optional cashier can be created.
+- Products, inventory, sales, reports, receipt settings, printer settings, and backups remain unchanged.
 
-## Validation
+## Security notice
 
-- Added race-condition regression coverage for stale saves and delayed Google Drive responses.
-- Added an automated guard that fails if a disabled data-entry control is introduced in the renderer.
-- All interactive fields that are displayed remain usable; safety and permission rules continue to apply to action buttons.
+- This is a local physical-access recovery option. Anyone who can use the Windows computer can start login recovery.

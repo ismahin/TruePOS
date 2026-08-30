@@ -57,6 +57,7 @@ function registerIpc() {
   ipcMain.handle("auth:isSetupRequired", () => services.isSetupRequired());
   ipcMain.handle("auth:setupInitialAdmin", (_event, username: string, password: string, cashier) => services.setupInitialAdmin(username, password, cashier));
   ipcMain.handle("auth:resetLoginCredentials", (_event, currentAdmin, admin, cashier) => services.resetLoginCredentials(currentAdmin, admin, cashier));
+  ipcMain.handle("auth:resetAllLoginCredentials", () => services.resetAllLoginCredentials());
 
   ipcMain.handle("products:create", (_event, input) => services.createProduct(input));
   ipcMain.handle("products:update", (_event, id, input) => services.updateProduct(id, input));

@@ -136,7 +136,7 @@ export function App() {
   }
   if (!user) return (
     <>
-      <Login onLogin={setUser} />
+      <Login onLogin={setUser} onResetAll={() => setSetupRequired(true)} />
       {errorDialog && <ErrorModal title={errorDialog.title} message={errorDialog.message} onClose={() => setErrorDialog(null)} />}
     </>
   );
@@ -234,12 +234,13 @@ function ErrorModal({ title, message, onClose }: { title: string; message: strin
   );
 }
 
-function Login({ onLogin }: { onLogin: (user: User) => void }) {
+function Login({ onLogin, onResetAll }: { onLogin: (user: User) => void; onResetAll: () => void }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [resetMode, setResetMode] = useState(false);
   const [notice, setNotice] = useState("");
+  const [resettingAll, setResettingAll] = useState(false);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -248,6 +249,28 @@ function Login({ onLogin }: { onLogin: (user: User) => void }) {
       onLogin(await api.auth.login(username, password));
     } catch (err) {
       setError(friendlyErrorMessage(err, "Sign in failed. Check the username and password, then try again."));
+    }
+  }
+
+  async function resetAllPasswords() {
+    const confirmed = window.confirm(
+      "Reset every TruePOS login account?\n\nYou will create a new admin login. Products, inventory, sales, reports, settings, and backups will remain unchanged."
+    );
+    if (!confirmed) return;
+    const finalConfirmed = window.confirm(
+      "Anyone with access to this computer can use this recovery action. Remove all existing admin and cashier passwords now?"
+    );
+    if (!finalConfirmed) return;
+
+    setError("");
+    setResettingAll(true);
+    try {
+      await api.auth.resetAllLoginCredentials();
+      onResetAll();
+    } catch (err) {
+      setError(friendlyErrorMessage(err, "Login accounts could not be reset. Close and reopen TruePOS, then try again."));
+    } finally {
+      setResettingAll(false);
     }
   }
 
@@ -284,6 +307,9 @@ function Login({ onLogin }: { onLogin: (user: User) => void }) {
         </button>
         <button className="secondary" type="button" onClick={() => setResetMode(true)}>
           Reset login
+        </button>
+        <button className="danger" type="button" disabled={resettingAll} onClick={() => void resetAllPasswords()}>
+          {resettingAll ? "Resetting all passwords..." : "Forgot passwords? Reset all logins"}
         </button>
       </form>
       {error && <ErrorModal title="Sign-in problem" message={error} onClose={() => setError("")} />}

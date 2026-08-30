@@ -10,7 +10,8 @@ const api: TruePOSApi = {
     getCurrentUser: () => invoke("auth:getCurrentUser"),
     isSetupRequired: () => invoke("auth:isSetupRequired"),
     setupInitialAdmin: (username, password, cashier) => invoke("auth:setupInitialAdmin", username, password, cashier),
-    resetLoginCredentials: (currentAdmin, admin, cashier) => invoke("auth:resetLoginCredentials", currentAdmin, admin, cashier)
+    resetLoginCredentials: (currentAdmin, admin, cashier) => invoke("auth:resetLoginCredentials", currentAdmin, admin, cashier),
+    resetAllLoginCredentials: () => invoke("auth:resetAllLoginCredentials")
   },
   products: {
     create: (input) => invoke("products:create", input),
