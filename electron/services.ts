@@ -38,6 +38,25 @@ const dbPasswordAccount = "local-database-key";
 const googleDriveRefreshTokenAccount = "google-drive-refresh-token";
 const googleDriveScopes = ["openid", "email", "profile", "https://www.googleapis.com/auth/drive.file"].join(" ");
 const bundledGoogleDriveClientId = "";
+const legacyDemoCatalogCleanupKey = "legacy-demo-catalog-cleanup-v1";
+
+const legacyDemoCatalog = [
+  { sku: "DEMO-001", barcode: "8901001000001", name: "Basmati Rice 5kg", category: "Grocery", unit: "bag", cost: 650, price: 780, vatRate: 0, stock: 40, lowStockThreshold: 8 },
+  { sku: "DEMO-002", barcode: "8901001000002", name: "Soybean Oil 1L", category: "Grocery", unit: "bottle", cost: 160, price: 185, vatRate: 0, stock: 60, lowStockThreshold: 12 },
+  { sku: "DEMO-003", barcode: "8901001000003", name: "White Sugar 1kg", category: "Grocery", unit: "pack", cost: 110, price: 130, vatRate: 0, stock: 55, lowStockThreshold: 10 },
+  { sku: "DEMO-004", barcode: "8901001000004", name: "Fresh Milk 1L", category: "Dairy", unit: "carton", cost: 70, price: 85, vatRate: 0, stock: 48, lowStockThreshold: 10 },
+  { sku: "DEMO-005", barcode: "8901001000005", name: "Farm Eggs (12 pcs)", category: "Dairy", unit: "tray", cost: 140, price: 165, vatRate: 0, stock: 35, lowStockThreshold: 8 },
+  { sku: "DEMO-006", barcode: "8901001000006", name: "Sandwich Bread", category: "Bakery", unit: "pcs", cost: 45, price: 55, vatRate: 0, stock: 30, lowStockThreshold: 6 },
+  { sku: "DEMO-007", barcode: "8901001000007", name: "Potato 1kg", category: "Produce", unit: "kg", cost: 30, price: 40, vatRate: 0, stock: 80, lowStockThreshold: 15 },
+  { sku: "DEMO-008", barcode: "8901001000008", name: "Onion 1kg", category: "Produce", unit: "kg", cost: 50, price: 65, vatRate: 0, stock: 70, lowStockThreshold: 15 },
+  { sku: "DEMO-009", barcode: "8901001000009", name: "Black Tea 400g", category: "Grocery", unit: "pack", cost: 180, price: 220, vatRate: 0, stock: 42, lowStockThreshold: 8 },
+  { sku: "DEMO-010", barcode: "8901001000010", name: "Bath Soap", category: "Personal Care", unit: "pcs", cost: 35, price: 45, vatRate: 5, stock: 90, lowStockThreshold: 20 },
+  { sku: "DEMO-011", barcode: "8901001000011", name: "Shampoo 180ml", category: "Personal Care", unit: "bottle", cost: 120, price: 155, vatRate: 5, stock: 38, lowStockThreshold: 8 },
+  { sku: "DEMO-012", barcode: "8901001000012", name: "Cream Biscuits", category: "Snacks", unit: "pack", cost: 25, price: 35, vatRate: 5, stock: 100, lowStockThreshold: 20 },
+  { sku: "DEMO-013", barcode: "8901001000013", name: "Soft Drink 1.25L", category: "Beverages", unit: "bottle", cost: 55, price: 70, vatRate: 5, stock: 64, lowStockThreshold: 12 },
+  { sku: "DEMO-014", barcode: "8901001000014", name: "Instant Noodles", category: "Snacks", unit: "pack", cost: 18, price: 25, vatRate: 5, stock: 120, lowStockThreshold: 24 },
+  { sku: "DEMO-015", barcode: "8901001000015", name: "Masoor Dal 1kg", category: "Grocery", unit: "pack", cost: 120, price: 145, vatRate: 0, stock: 50, lowStockThreshold: 10 }
+] as const;
 
 const defaultSettings: AppSettings = DEFAULT_APP_SETTINGS;
 
@@ -145,97 +164,6 @@ function resolveProductImage(stored: string) {
   const buffer = fs.readFileSync(fullPath);
   if (!buffer.length) return "";
   return `data:image/jpeg;base64,${buffer.toString("base64")}`;
-}
-
-const DEMO_LETTER_GLYPHS: Record<string, string[]> = {
-  A: ["01110", "10001", "10001", "11111", "10001", "10001", "10001"],
-  B: ["11110", "10001", "10001", "11110", "10001", "10001", "11110"],
-  C: ["01111", "10000", "10000", "10000", "10000", "10000", "01111"],
-  D: ["11110", "10001", "10001", "10001", "10001", "10001", "11110"],
-  E: ["11111", "10000", "10000", "11110", "10000", "10000", "11111"],
-  F: ["11111", "10000", "10000", "11110", "10000", "10000", "10000"],
-  I: ["11111", "00100", "00100", "00100", "00100", "00100", "11111"],
-  M: ["10001", "11011", "10101", "10001", "10001", "10001", "10001"],
-  N: ["10001", "11001", "10101", "10011", "10001", "10001", "10001"],
-  O: ["01110", "10001", "10001", "10001", "10001", "10001", "01110"],
-  P: ["11110", "10001", "10001", "11110", "10000", "10000", "10000"],
-  R: ["11110", "10001", "10001", "11110", "10100", "10010", "10001"],
-  S: ["01111", "10000", "10000", "01110", "00001", "00001", "11110"],
-  T: ["11111", "00100", "00100", "00100", "00100", "00100", "00100"],
-  W: ["10001", "10001", "10001", "10101", "10101", "11011", "10001"]
-};
-
-function buildDemoProductImage(name: string, rgb: [number, number, number]) {
-  const size = 256;
-  const buf = Buffer.alloc(size * size * 4);
-  const [baseR, baseG, baseB] = rgb;
-  const initial = (name.trim()[0] || "P").toUpperCase();
-  const bgra = process.platform === "win32";
-
-  const writePixel = (index: number, r: number, g: number, b: number) => {
-    if (bgra) {
-      buf[index] = b;
-      buf[index + 1] = g;
-      buf[index + 2] = r;
-    } else {
-      buf[index] = r;
-      buf[index + 1] = g;
-      buf[index + 2] = b;
-    }
-    buf[index + 3] = 255;
-  };
-
-  for (let y = 0; y < size; y++) {
-    for (let x = 0; x < size; x++) {
-      const index = (y * size + x) * 4;
-      const t = y / (size - 1);
-      const dx = (x - size / 2) / (size / 2);
-      const dy = (y - size / 2) / (size / 2);
-      const dist = Math.min(1, Math.sqrt(dx * dx + dy * dy));
-      const shade = 0.82 + t * 0.22 - dist * 0.14;
-      let r = Math.min(255, Math.max(0, Math.round(baseR * shade)));
-      let g = Math.min(255, Math.max(0, Math.round(baseG * shade)));
-      let b = Math.min(255, Math.max(0, Math.round(baseB * shade)));
-
-      if (dist < 0.46) {
-        const mix = Math.pow((0.46 - dist) / 0.46, 1.15) * 0.88;
-        r = Math.round(r * (1 - mix) + 255 * mix);
-        g = Math.round(g * (1 - mix) + 255 * mix);
-        b = Math.round(b * (1 - mix) + 255 * mix);
-      }
-
-      writePixel(index, r, g, b);
-    }
-  }
-
-  const glyph = DEMO_LETTER_GLYPHS[initial] ?? DEMO_LETTER_GLYPHS.P;
-  const scale = 10;
-  const glyphWidth = 5 * scale;
-  const glyphHeight = 7 * scale;
-  const originX = Math.floor((size - glyphWidth) / 2);
-  const originY = Math.floor((size - glyphHeight) / 2);
-  for (let row = 0; row < glyph.length; row++) {
-    for (let col = 0; col < glyph[row].length; col++) {
-      if (glyph[row][col] !== "1") continue;
-      for (let py = 0; py < scale; py++) {
-        for (let px = 0; px < scale; px++) {
-          const x = originX + col * scale + px;
-          const y = originY + row * scale + py;
-          const index = (y * size + x) * 4;
-          writePixel(
-            index,
-            Math.max(30, Math.round(baseR * 0.35)),
-            Math.max(30, Math.round(baseG * 0.35)),
-            Math.max(30, Math.round(baseB * 0.35))
-          );
-        }
-      }
-    }
-  }
-
-  const image = nativeImage.createFromBitmap(buf, { width: size, height: size });
-  if (image.isEmpty()) throw new Error("Demo product image could not be created.");
-  return `data:image/jpeg;base64,${image.toJPEG(84).toString("base64")}`;
 }
 
 function databasePath() {
@@ -611,73 +539,66 @@ export class TruePOSServices {
     if (!settings) {
       this.db.prepare("INSERT INTO settings (key, value) VALUES ('app', ?)").run(JSON.stringify(defaultSettings));
     }
-    this.seedDemoCatalog();
+    this.removeLegacyDemoCatalog();
   }
 
-  private seedDemoCatalog() {
-    const catalog: Array<{
-      sku: string;
-      barcode: string;
-      name: string;
-      category: string;
-      unit: string;
-      cost: number;
-      price: number;
-      vatRate: number;
-      stock: number;
-      lowStockThreshold: number;
-      color: [number, number, number];
-    }> = [
-      { sku: "DEMO-001", barcode: "8901001000001", name: "Basmati Rice 5kg", category: "Grocery", unit: "bag", cost: 650, price: 780, vatRate: 0, stock: 40, lowStockThreshold: 8, color: [210, 180, 120] },
-      { sku: "DEMO-002", barcode: "8901001000002", name: "Soybean Oil 1L", category: "Grocery", unit: "bottle", cost: 160, price: 185, vatRate: 0, stock: 60, lowStockThreshold: 12, color: [240, 190, 70] },
-      { sku: "DEMO-003", barcode: "8901001000003", name: "White Sugar 1kg", category: "Grocery", unit: "pack", cost: 110, price: 130, vatRate: 0, stock: 55, lowStockThreshold: 10, color: [245, 245, 248] },
-      { sku: "DEMO-004", barcode: "8901001000004", name: "Fresh Milk 1L", category: "Dairy", unit: "carton", cost: 70, price: 85, vatRate: 0, stock: 48, lowStockThreshold: 10, color: [236, 245, 255] },
-      { sku: "DEMO-005", barcode: "8901001000005", name: "Farm Eggs (12 pcs)", category: "Dairy", unit: "tray", cost: 140, price: 165, vatRate: 0, stock: 35, lowStockThreshold: 8, color: [252, 226, 170] },
-      { sku: "DEMO-006", barcode: "8901001000006", name: "Sandwich Bread", category: "Bakery", unit: "pcs", cost: 45, price: 55, vatRate: 0, stock: 30, lowStockThreshold: 6, color: [224, 180, 120] },
-      { sku: "DEMO-007", barcode: "8901001000007", name: "Potato 1kg", category: "Produce", unit: "kg", cost: 30, price: 40, vatRate: 0, stock: 80, lowStockThreshold: 15, color: [196, 154, 90] },
-      { sku: "DEMO-008", barcode: "8901001000008", name: "Onion 1kg", category: "Produce", unit: "kg", cost: 50, price: 65, vatRate: 0, stock: 70, lowStockThreshold: 15, color: [198, 120, 150] },
-      { sku: "DEMO-009", barcode: "8901001000009", name: "Black Tea 400g", category: "Grocery", unit: "pack", cost: 180, price: 220, vatRate: 0, stock: 42, lowStockThreshold: 8, color: [120, 72, 48] },
-      { sku: "DEMO-010", barcode: "8901001000010", name: "Bath Soap", category: "Personal Care", unit: "pcs", cost: 35, price: 45, vatRate: 5, stock: 90, lowStockThreshold: 20, color: [120, 190, 210] },
-      { sku: "DEMO-011", barcode: "8901001000011", name: "Shampoo 180ml", category: "Personal Care", unit: "bottle", cost: 120, price: 155, vatRate: 5, stock: 38, lowStockThreshold: 8, color: [90, 130, 210] },
-      { sku: "DEMO-012", barcode: "8901001000012", name: "Cream Biscuits", category: "Snacks", unit: "pack", cost: 25, price: 35, vatRate: 5, stock: 100, lowStockThreshold: 20, color: [232, 168, 100] },
-      { sku: "DEMO-013", barcode: "8901001000013", name: "Soft Drink 1.25L", category: "Beverages", unit: "bottle", cost: 55, price: 70, vatRate: 5, stock: 64, lowStockThreshold: 12, color: [220, 70, 70] },
-      { sku: "DEMO-014", barcode: "8901001000014", name: "Instant Noodles", category: "Snacks", unit: "pack", cost: 18, price: 25, vatRate: 5, stock: 120, lowStockThreshold: 24, color: [235, 140, 60] },
-      { sku: "DEMO-015", barcode: "8901001000015", name: "Masoor Dal 1kg", category: "Grocery", unit: "pack", cost: 120, price: 145, vatRate: 0, stock: 50, lowStockThreshold: 10, color: [196, 84, 72] }
-    ];
+  private removeLegacyDemoCatalog() {
+    const cleanupDone = this.db.prepare("SELECT 1 FROM settings WHERE key = ?").get(legacyDemoCatalogCleanupKey);
+    if (cleanupDone) return;
 
-    const insert = this.db.prepare(
-      `INSERT INTO products
-      (id, sku, barcode, name, category, unit, cost, price, vat_rate, stock, low_stock_threshold, is_active, image_data_url, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`
-    );
-    const findSku = this.db.prepare("SELECT id FROM products WHERE sku = ?");
-    const findBarcode = this.db.prepare("SELECT id FROM products WHERE barcode = ?");
+    const findProduct = this.db.prepare("SELECT * FROM products WHERE sku = ? AND barcode = ?");
+    const findSaleCount = this.db.prepare("SELECT COUNT(*) AS count FROM sale_lines WHERE product_id = ?");
+    const findPriceHistoryCount = this.db.prepare("SELECT COUNT(*) AS count FROM price_history WHERE product_id = ?");
+    const findMovements = this.db.prepare("SELECT type, quantity, note FROM inventory_movements WHERE product_id = ?");
+    const deleteMovements = this.db.prepare("DELETE FROM inventory_movements WHERE product_id = ?");
+    const deleteProduct = this.db.prepare("DELETE FROM products WHERE id = ?");
+    const deactivateProduct = this.db.prepare("UPDATE products SET is_active = 0, updated_at = ? WHERE id = ?");
+    const removedImageIds: string[] = [];
 
     this.db.transaction(() => {
-      for (const item of catalog) {
-        if (findSku.get(item.sku) || findBarcode.get(item.barcode)) continue;
-        const productId = uuid();
-        const createdAt = now();
-        const imageDataUrl = persistProductImage(productId, buildDemoProductImage(item.name, item.color));
-        insert.run(
-          productId,
-          item.sku,
-          item.barcode,
-          item.name,
-          item.category,
-          item.unit,
-          item.cost,
-          item.price,
-          item.vatRate,
-          item.stock,
-          item.lowStockThreshold,
-          imageDataUrl,
-          createdAt,
-          createdAt
-        );
-        if (item.stock !== 0) this.addMovement(productId, "stock_in", item.stock, "Demo opening stock");
+      for (const item of legacyDemoCatalog) {
+        const product = findProduct.get(item.sku, item.barcode) as Row | undefined;
+        if (!product) continue;
+
+        const productId = String(product.id);
+        const saleCount = Number((findSaleCount.get(productId) as Row | undefined)?.count ?? 0);
+        const priceHistoryCount = Number((findPriceHistoryCount.get(productId) as Row | undefined)?.count ?? 0);
+        const movements = findMovements.all(productId) as Row[];
+        const unchangedProduct =
+          String(product.name) === item.name &&
+          String(product.category) === item.category &&
+          String(product.unit) === item.unit &&
+          Number(product.cost) === item.cost &&
+          Number(product.price) === item.price &&
+          Number(product.vat_rate) === item.vatRate &&
+          Number(product.stock) === item.stock &&
+          Number(product.low_stock_threshold) === item.lowStockThreshold;
+        const onlyDemoOpeningStock =
+          movements.length === 1 &&
+          String(movements[0].type) === "stock_in" &&
+          Number(movements[0].quantity) === item.stock &&
+          String(movements[0].note) === "Demo opening stock";
+
+        if (saleCount === 0 && priceHistoryCount === 0 && unchangedProduct && onlyDemoOpeningStock) {
+          deleteMovements.run(productId);
+          deleteProduct.run(productId);
+          removedImageIds.push(productId);
+        } else {
+          // Keep historical references valid while removing the legacy demo item from the active catalog.
+          deactivateProduct.run(now(), productId);
+        }
       }
+
+      this.db.prepare("INSERT INTO settings (key, value) VALUES (?, ?)").run(legacyDemoCatalogCleanupKey, now());
     })();
+
+    for (const productId of removedImageIds) {
+      try {
+        clearProductImageFiles(productId);
+      } catch (error) {
+        console.warn(`Could not remove legacy demo image for product ${productId}:`, error);
+      }
+    }
   }
 
   private requireUser() {

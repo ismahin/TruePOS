@@ -1,35 +1,14 @@
-# TruePOS v0.1.30
+# TruePOS v0.1.31
 
-## Highlights
+## Product catalog cleanup
 
-- More reliable product CSV import (updates existing SKUs instead of skipping them)
-- Delete all products from Catalog (admin)
-- Auto SKU / barcode after category is set; both fields are read-only
-- Category is required when saving a product
+- Removed the automatic 15-product demo catalog from new installations.
+- Added a one-time cleanup for demo products already created by older versions.
+- Unused, unchanged demo products are removed together with their generated images and opening-stock records.
+- Demo products referenced by real sales or edited by the user are safely deactivated instead of deleting historical data.
+- User-created products, inventory records, and sales history are preserved.
 
-## Catalog & products
+## Reliability
 
-- CSV import now **updates** matching products by SKU/barcode and restores stock / active status
-- Import toast shows added, updated, and skipped counts, plus the first error when rows fail
-- **Delete All** soft-deactivates every active product (sales history stays intact)
-- CSV Export remains available next to Import
-- New products get SKU/barcode automatically after you enter **Category** (prefix from category)
-- SKU and barcode fields no longer accept manual typing
-- Category is mandatory in the product form and on the server
-
-## Billing & UX
-
-- Empty cart no longer leaves a large gap above totals
-- Park bill renamed to **Hold**; parked bills to **Held bills**
-- Background failures show warning toasts instead of blocking the UI with an error modal
-
-## Reports
-
-- Sales trend chart uses real Y-axis scaling (no fake bar height for zero days)
-- Long date ranges aggregate by day/week/month/year instead of a hard 31-day cap
-- Faster trend loading via a single `getSalesTrend` query
-
-## Stock & demo data
-
-- Opening stock restored on Add Product
-- Demo catalog seeding for local testing
+- The cleanup is recorded after it runs so future user-created products cannot be mistaken for legacy demo data.
+- Receipt-preview sample content remains preview-only and is never inserted into the product catalog.
