@@ -19,6 +19,7 @@ export type Product = {
   stock: number;
   lowStockThreshold: number;
   isActive: boolean;
+  imageDataUrl: string;
   createdAt: string;
   updatedAt: string;
 };
@@ -46,6 +47,7 @@ export type CartLine = {
   unitPrice: number;
   discount: number;
   vatRate: number;
+  imageDataUrl?: string;
 };
 
 export type SalePayment = {
@@ -55,6 +57,8 @@ export type SalePayment = {
 
 export type SaleTotals = {
   subtotal: number;
+  itemDiscountTotal: number;
+  billDiscountTotal: number;
   discountTotal: number;
   taxableTotal: number;
   vatTotal: number;
@@ -69,8 +73,15 @@ export type Sale = {
   totals: SaleTotals;
   cashierId: string;
   cashierName: string;
-  status: "completed" | "returned";
+  customerName: string;
+  customerPhone: string;
+  status: "completed" | "returned" | "cancelled";
   createdAt: string;
+};
+
+export type SaleCustomer = {
+  name: string;
+  phone: string;
 };
 
 export type ReceiptSettings = {
@@ -133,12 +144,21 @@ export type SalesReport = {
   profitEstimate: number;
 };
 
+export type SalesTrendGranularity = "day" | "week" | "month" | "year";
+
+export type SalesTrendReport = {
+  granularity: SalesTrendGranularity;
+  dayCount: number;
+  points: SalesReport[];
+};
+
 export type ProductSalesReport = {
   productId: string;
   sku: string;
   name: string;
   quantity: number;
   revenue: number;
+  imageDataUrl?: string;
 };
 
 export type InventoryValueReport = {
@@ -173,9 +193,10 @@ export type ProductApi = {
   create(input: ProductInput): Promise<Product>;
   update(id: string, input: Partial<ProductInput>): Promise<Product>;
   delete(id: string): Promise<Product>;
+  deleteAll(): Promise<{ deleted: number }>;
   search(query: string): Promise<Product[]>;
   list(params?: { query?: string; includeInactive?: boolean; lowStockOnly?: boolean; category?: string }): Promise<Product[]>;
-  importCsv(csv: string): Promise<{ imported: number; skipped: number }>;
+  importCsv(csv: string): Promise<{ imported: number; updated: number; skipped: number; errors: string[] }>;
 };
 
 export type InventoryApi = {
@@ -185,11 +206,18 @@ export type InventoryApi = {
 };
 
 export type SalesApi = {
-  createAndPrintSale(lines: CartLine[], payment: SalePayment): Promise<Sale>;
+  createAndPrintSale(
+    lines: CartLine[],
+    payment: SalePayment,
+    billDiscount?: number,
+    customer?: SaleCustomer,
+    reservedStockByProductId?: Record<string, number>
+  ): Promise<Sale>;
   returnSale(saleId: string): Promise<Sale>;
   cancelSale(saleId: string): Promise<Sale>;
-  previewReceipt(lines: CartLine[], payment: SalePayment): Promise<string>;
-  searchReceipts(receiptNumber: string): Promise<Sale[]>;
+  previewReceipt(lines: CartLine[], payment: SalePayment, billDiscount?: number, customer?: SaleCustomer): Promise<string>;
+  searchReceipts(query: string): Promise<Sale[]>;
+  listSalesForDate(date: string, limit?: number): Promise<Sale[]>;
   previewSavedReceipt(saleId: string): Promise<string>;
   getReceipt(saleId: string): Promise<string>;
 };
@@ -197,6 +225,7 @@ export type SalesApi = {
 export type ReportsApi = {
   getDailySales(date: string): Promise<SalesReport>;
   getSalesSummary(dateFrom: string, dateTo: string): Promise<SalesReport>;
+  getSalesTrend(dateFrom: string, dateTo: string): Promise<SalesTrendReport>;
   getProductSales(dateFrom: string, dateTo: string): Promise<ProductSalesReport[]>;
   getInventoryValue(): Promise<InventoryValueReport>;
 };

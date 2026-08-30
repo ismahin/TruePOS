@@ -9,23 +9,50 @@ export function calculatePaymentBalance(grandTotal: number, amountPaid: number) 
   };
 }
 
-export function calculateTotals(lines: CartLine[]): SaleTotals {
-  return lines.reduce<SaleTotals>(
-    (totals, line) => {
+/** Round cash tender up to the next convenient note step (default BDT 5). */
+export function roundCashUp(amount: number, step = 5) {
+  const total = money(Math.max(0, amount));
+  if (total <= 0) return 0;
+  const size = Math.max(1, step);
+  return money(Math.ceil(total / size) * size);
+}
+
+export function calculateTotals(lines: CartLine[], billDiscount = 0): SaleTotals {
+  const totals = lines.reduce<SaleTotals>(
+    (acc, line) => {
       const lineSubtotal = money(line.quantity * line.unitPrice);
       const lineDiscount = money(line.quantity * line.discount);
       const taxable = Math.max(0, money(lineSubtotal - lineDiscount));
       const vat = money(taxable * (line.vatRate / 100));
 
-      totals.subtotal = money(totals.subtotal + lineSubtotal);
-      totals.discountTotal = money(totals.discountTotal + lineDiscount);
-      totals.taxableTotal = money(totals.taxableTotal + taxable);
-      totals.vatTotal = money(totals.vatTotal + vat);
-      totals.grandTotal = money(totals.grandTotal + taxable + vat);
-      return totals;
+      acc.subtotal = money(acc.subtotal + lineSubtotal);
+      acc.itemDiscountTotal = money(acc.itemDiscountTotal + lineDiscount);
+      acc.discountTotal = money(acc.discountTotal + lineDiscount);
+      acc.taxableTotal = money(acc.taxableTotal + taxable);
+      acc.vatTotal = money(acc.vatTotal + vat);
+      acc.grandTotal = money(acc.grandTotal + taxable + vat);
+      return acc;
     },
-    { subtotal: 0, discountTotal: 0, taxableTotal: 0, vatTotal: 0, grandTotal: 0 }
+    {
+      subtotal: 0,
+      itemDiscountTotal: 0,
+      billDiscountTotal: 0,
+      discountTotal: 0,
+      taxableTotal: 0,
+      vatTotal: 0,
+      grandTotal: 0
+    }
   );
+
+  // Whole-bill discount (promos, courtesy, missing small change) applied to payable after line math.
+  const appliedBillDiscount = money(Math.max(0, Math.min(money(billDiscount), totals.grandTotal)));
+  if (appliedBillDiscount <= 0) return totals;
+  return {
+    ...totals,
+    billDiscountTotal: appliedBillDiscount,
+    discountTotal: money(totals.discountTotal + appliedBillDiscount),
+    grandTotal: money(totals.grandTotal - appliedBillDiscount)
+  };
 }
 
 export function validateCode128Value(value: string): string {
@@ -65,6 +92,13 @@ function escapeReceiptHtml(value: string): string {
   })[character]!);
 }
 
+export const escapeHtml = escapeReceiptHtml;
+
+export function cartLinePayable(line: CartLine) {
+  const taxable = money(Math.max(0, (line.unitPrice - line.discount) * line.quantity));
+  return money(taxable + taxable * (line.vatRate / 100));
+}
+
 export function buildReceiptHtml(
   sale: Sale,
   settings: AppSettings,
@@ -95,6 +129,7 @@ export function buildReceiptHtml(
   const paymentMethod = sale.payment.method === "mobile" ? "Mobile banking" : `${sale.payment.method[0].toUpperCase()}${sale.payment.method.slice(1)}`;
   const headerLines = receipt.header.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   const footerLines = receipt.footer.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const customerLabel = [sale.customerName?.trim(), sale.customerPhone?.trim()].filter(Boolean).join(" · ");
   const logo = receipt.logoDataUrl.startsWith("data:image/")
     ? `<div class="logo-wrap"><img class="logo" src="${escapeReceiptHtml(receipt.logoDataUrl)}" alt="" /></div>`
     : "";
@@ -167,6 +202,7 @@ export function buildReceiptHtml(
         <div class="meta-row"><span>Time</span><strong>${escapeReceiptHtml(time)}</strong></div>
       </div>
       <div class="meta-row"><span>Cashier</span><strong>${escapeReceiptHtml(sale.cashierName)}</strong></div>
+      ${customerLabel ? `<div class="meta-row"><span>Customer</span><strong>${escapeReceiptHtml(customerLabel)}</strong></div>` : ""}
     </section>
     <div class="rule"></div>
     <div class="table-head"><span>Description</span><span>Qty</span><span>Amount</span></div>
@@ -174,7 +210,9 @@ export function buildReceiptHtml(
     <div class="currency-note">All amounts in BDT</div>
     <section class="summary">
       ${summaryRow("Subtotal", formatReceiptAmount(sale.totals.subtotal))}
-      ${summaryRow("Discount", formatReceiptAmount(sale.totals.discountTotal))}
+      ${sale.totals.itemDiscountTotal > 0 ? summaryRow("Item discount", formatReceiptAmount(sale.totals.itemDiscountTotal)) : ""}
+      ${sale.totals.billDiscountTotal > 0 ? summaryRow("Bill discount (after VAT)", formatReceiptAmount(sale.totals.billDiscountTotal)) : ""}
+      ${sale.totals.itemDiscountTotal <= 0 && sale.totals.billDiscountTotal <= 0 ? summaryRow("Discount", formatReceiptAmount(sale.totals.discountTotal)) : ""}
       ${receipt.showVatBreakdown ? summaryRow("VAT", formatReceiptAmount(sale.totals.vatTotal)) : ""}
       ${summaryRow("Payable", formatReceiptAmount(sale.totals.grandTotal), "payable")}
       ${summaryRow("Paid", formatReceiptAmount(sale.payment.amount))}
@@ -199,6 +237,7 @@ export function buildReceiptText(sale: Sale, settings: AppSettings): string {
 
   const paymentBalance = calculatePaymentBalance(sale.totals.grandTotal, sale.payment.amount);
   const paymentMethod = sale.payment.method === "mobile" ? "Mobile banking" : `${sale.payment.method[0].toUpperCase()}${sale.payment.method.slice(1)}`;
+  const customerLabel = [sale.customerName?.trim(), sale.customerPhone?.trim()].filter(Boolean).join(" · ");
   const lines = [
     center(settings.shopName),
     ...receipt.header.split("\n").filter(Boolean).map(center),
@@ -206,6 +245,7 @@ export function buildReceiptText(sale: Sale, settings: AppSettings): string {
     row("Receipt", sale.receiptNo),
     row("Date", new Date(sale.createdAt).toLocaleString("en-BD")),
     row("Cashier", sale.cashierName),
+    ...(customerLabel ? [row("Customer", customerLabel)] : []),
     divider,
     ...sale.lines.flatMap((item) => [
       item.name.slice(0, lineWidth),
@@ -213,7 +253,11 @@ export function buildReceiptText(sale: Sale, settings: AppSettings): string {
     ]),
     divider,
     row("Subtotal", formatBdt(sale.totals.subtotal)),
-    row("Discount", formatBdt(sale.totals.discountTotal)),
+    ...(sale.totals.itemDiscountTotal > 0 ? [row("Item discount", formatBdt(sale.totals.itemDiscountTotal))] : []),
+    ...(sale.totals.billDiscountTotal > 0 ? [row("Bill discount (after VAT)", formatBdt(sale.totals.billDiscountTotal))] : []),
+    ...(sale.totals.itemDiscountTotal <= 0 && sale.totals.billDiscountTotal <= 0
+      ? [row("Discount", formatBdt(sale.totals.discountTotal))]
+      : []),
     ...(receipt.showVatBreakdown ? [row("VAT", formatBdt(sale.totals.vatTotal))] : []),
     row("Total", formatBdt(sale.totals.grandTotal)),
     row("Payment", paymentMethod),

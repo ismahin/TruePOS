@@ -16,6 +16,7 @@ const api: TruePOSApi = {
     create: (input) => invoke("products:create", input),
     update: (id, input) => invoke("products:update", id, input),
     delete: (id) => invoke("products:delete", id),
+    deleteAll: () => invoke("products:deleteAll"),
     search: (query) => invoke("products:search", query),
     list: (params) => invoke("products:list", params),
     importCsv: (csv) => invoke("products:importCsv", csv)
@@ -26,17 +27,21 @@ const api: TruePOSApi = {
     getStock: (productId) => invoke("inventory:getStock", productId)
   },
   sales: {
-    createAndPrintSale: (lines, payment) => invoke("sales:createAndPrintSale", lines, payment),
+    createAndPrintSale: (lines, payment, billDiscount, customer, reservedStockByProductId) =>
+      invoke("sales:createAndPrintSale", lines, payment, billDiscount, customer, reservedStockByProductId),
     returnSale: (saleId) => invoke("sales:returnSale", saleId),
     cancelSale: (saleId) => invoke("sales:cancelSale", saleId),
-    previewReceipt: (lines, payment) => invoke("sales:previewReceipt", lines, payment),
-    searchReceipts: (receiptNumber) => invoke("sales:searchReceipts", receiptNumber),
+    previewReceipt: (lines, payment, billDiscount, customer) =>
+      invoke("sales:previewReceipt", lines, payment, billDiscount, customer),
+    searchReceipts: (query) => invoke("sales:searchReceipts", query),
+    listSalesForDate: (date, limit) => invoke("sales:listSalesForDate", date, limit),
     previewSavedReceipt: (saleId) => invoke("sales:previewSavedReceipt", saleId),
     getReceipt: (saleId) => invoke("sales:getReceipt", saleId)
   },
   reports: {
     getDailySales: (date) => invoke("reports:getDailySales", date),
     getSalesSummary: (dateFrom, dateTo) => invoke("reports:getSalesSummary", dateFrom, dateTo),
+    getSalesTrend: (dateFrom, dateTo) => invoke("reports:getSalesTrend", dateFrom, dateTo),
     getProductSales: (dateFrom, dateTo) => invoke("reports:getProductSales", dateFrom, dateTo),
     getInventoryValue: () => invoke("reports:getInventoryValue")
   },

@@ -18,11 +18,16 @@ import type {
   ProductInput,
   ProductSalesReport,
   Sale,
+  SaleCustomer,
   SalePayment,
   SalesReport,
+  SalesTrendGranularity,
+  SalesTrendReport,
   User
 } from "../src/shared/contracts.js";
-import { buildReceiptHtml, buildReceiptText, calculateTotals, money, validateCode128Value } from "../src/shared/pos.js";
+import { buildReceiptHtml, buildReceiptText, calculateTotals, escapeHtml, money, validateCode128Value } from "../src/shared/pos.js";
+import { rankBySearchFields, rankSearchResults } from "../src/shared/search.js";
+import { DEFAULT_APP_SETTINGS } from "../src/shared/default-settings.js";
 import { makeReceiptBitmapMonochrome, XP365B_SAFE_RECEIPT_WIDTH_DOTS, validateLabelQuantity } from "../src/shared/xprinter.js";
 
 type Row = Record<string, unknown>;
@@ -34,49 +39,7 @@ const googleDriveRefreshTokenAccount = "google-drive-refresh-token";
 const googleDriveScopes = ["openid", "email", "profile", "https://www.googleapis.com/auth/drive.file"].join(" ");
 const bundledGoogleDriveClientId = "";
 
-const defaultSettings: AppSettings = {
-  shopName: "TruePOS Store",
-  currency: "BDT",
-  receiptPrinter: "",
-  barcodePrinter: "",
-  printerMode: "xprinter",
-  receipt: {
-    widthMm: 80,
-    fontSize: 12,
-    fontFamily: "Consolas",
-    language: "en",
-    padding: 8,
-    logoDataUrl: "",
-    logoWidthMm: 32,
-    logoHeightMm: 16,
-    logoScale: 100,
-    logoOffsetX: 0,
-    logoOffsetY: 0,
-    header: "Offline POS\nDhaka, Bangladesh",
-    footer: "Thank you for shopping",
-    showVatBreakdown: true
-  },
-  barcode: {
-    format: "code128",
-    labelWidthMm: 45,
-    labelHeightMm: 35,
-    padding: 6,
-    printSpeed: 4,
-    density: 8,
-    gapMm: 2,
-    offsetMm: 0,
-    showName: true,
-    showPrice: true
-  },
-  googleDrive: {
-    connected: false,
-    accountEmail: "",
-    autoBackupEnabled: false,
-    backupTime: "22:00",
-    lastBackupAt: "",
-    lastBackupStatus: ""
-  }
-};
+const defaultSettings: AppSettings = DEFAULT_APP_SETTINGS;
 
 function mergeSettings(settings: Partial<AppSettings>): AppSettings {
   const storedPrinterMode = String((settings as { printerMode?: string }).printerMode ?? "");
@@ -87,7 +50,9 @@ function mergeSettings(settings: Partial<AppSettings>): AppSettings {
     printerMode,
     receipt: {
       ...defaultSettings.receipt,
-      ...settings.receipt
+      ...settings.receipt,
+      logoOffsetY: Math.max(0, Number(settings.receipt?.logoOffsetY ?? defaultSettings.receipt.logoOffsetY) || 0),
+      logoScale: Math.min(200, Math.max(25, Number(settings.receipt?.logoScale ?? defaultSettings.receipt.logoScale) || 100))
     },
     barcode: {
       ...defaultSettings.barcode,
@@ -108,6 +73,169 @@ function dataDir() {
   const dir = path.join(app.getPath("appData"), "TruePOS", "data");
   fs.mkdirSync(dir, { recursive: true });
   return dir;
+}
+
+function productImagesDir() {
+  const dir = path.join(dataDir(), "product-images");
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function clearProductImageFiles(productId: string) {
+  for (const file of fs.readdirSync(productImagesDir())) {
+    if (file === `${productId}.jpg` || file.startsWith(`${productId}.`)) {
+      fs.rmSync(path.join(productImagesDir(), file), { force: true });
+    }
+  }
+}
+
+function persistProductImage(productId: string, value: unknown) {
+  const raw = typeof value === "string" ? value.trim() : "";
+  if (!raw) {
+    clearProductImageFiles(productId);
+    return "";
+  }
+  if (raw === `product-images/${productId}.jpg`) return raw;
+  if (raw.startsWith("product-images/")) {
+    const fullPath = path.join(dataDir(), raw);
+    if (!fs.existsSync(fullPath)) {
+      clearProductImageFiles(productId);
+      return "";
+    }
+    return raw;
+  }
+
+  const match = /^data:image\/(png|jpeg|jpg|webp);base64,([a-z0-9+/=\s]+)$/i.exec(raw);
+  if (!match) throw new Error("Product image must be a PNG, JPEG, or WebP image.");
+  const source = Buffer.from(match[2].replace(/\s+/g, ""), "base64");
+  if (!source.length) throw new Error("Product image could not be read. Choose another image and try again.");
+  if (source.length > 2_500_000) throw new Error("Product image is too large. Choose a smaller image and try again.");
+
+  let image = nativeImage.createFromBuffer(source);
+  if (image.isEmpty()) {
+    image = nativeImage.createFromDataURL(raw);
+  }
+  if (image.isEmpty()) throw new Error("Product image could not be processed. Choose another image and try again.");
+
+  const { width, height } = image.getSize();
+  const maxSide = 480;
+  const scale = Math.min(1, maxSide / Math.max(width, height, 1));
+  if (scale < 1) {
+    image = image.resize({
+      width: Math.max(1, Math.round(width * scale)),
+      height: Math.max(1, Math.round(height * scale)),
+      quality: "best"
+    });
+  }
+
+  const jpeg = image.toJPEG(82);
+  clearProductImageFiles(productId);
+  const relativePath = `product-images/${productId}.jpg`;
+  fs.writeFileSync(path.join(dataDir(), relativePath), jpeg);
+  return relativePath;
+}
+
+function resolveProductImage(stored: string) {
+  const value = stored.trim();
+  if (!value) return "";
+  if (/^data:image\/(png|jpeg|jpg|webp);base64,/i.test(value)) return value;
+  if (!value.startsWith("product-images/")) return "";
+  const fullPath = path.join(dataDir(), value);
+  if (!fs.existsSync(fullPath)) return "";
+  const buffer = fs.readFileSync(fullPath);
+  if (!buffer.length) return "";
+  return `data:image/jpeg;base64,${buffer.toString("base64")}`;
+}
+
+const DEMO_LETTER_GLYPHS: Record<string, string[]> = {
+  A: ["01110", "10001", "10001", "11111", "10001", "10001", "10001"],
+  B: ["11110", "10001", "10001", "11110", "10001", "10001", "11110"],
+  C: ["01111", "10000", "10000", "10000", "10000", "10000", "01111"],
+  D: ["11110", "10001", "10001", "10001", "10001", "10001", "11110"],
+  E: ["11111", "10000", "10000", "11110", "10000", "10000", "11111"],
+  F: ["11111", "10000", "10000", "11110", "10000", "10000", "10000"],
+  I: ["11111", "00100", "00100", "00100", "00100", "00100", "11111"],
+  M: ["10001", "11011", "10101", "10001", "10001", "10001", "10001"],
+  N: ["10001", "11001", "10101", "10011", "10001", "10001", "10001"],
+  O: ["01110", "10001", "10001", "10001", "10001", "10001", "01110"],
+  P: ["11110", "10001", "10001", "11110", "10000", "10000", "10000"],
+  R: ["11110", "10001", "10001", "11110", "10100", "10010", "10001"],
+  S: ["01111", "10000", "10000", "01110", "00001", "00001", "11110"],
+  T: ["11111", "00100", "00100", "00100", "00100", "00100", "00100"],
+  W: ["10001", "10001", "10001", "10101", "10101", "11011", "10001"]
+};
+
+function buildDemoProductImage(name: string, rgb: [number, number, number]) {
+  const size = 256;
+  const buf = Buffer.alloc(size * size * 4);
+  const [baseR, baseG, baseB] = rgb;
+  const initial = (name.trim()[0] || "P").toUpperCase();
+  const bgra = process.platform === "win32";
+
+  const writePixel = (index: number, r: number, g: number, b: number) => {
+    if (bgra) {
+      buf[index] = b;
+      buf[index + 1] = g;
+      buf[index + 2] = r;
+    } else {
+      buf[index] = r;
+      buf[index + 1] = g;
+      buf[index + 2] = b;
+    }
+    buf[index + 3] = 255;
+  };
+
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const index = (y * size + x) * 4;
+      const t = y / (size - 1);
+      const dx = (x - size / 2) / (size / 2);
+      const dy = (y - size / 2) / (size / 2);
+      const dist = Math.min(1, Math.sqrt(dx * dx + dy * dy));
+      const shade = 0.82 + t * 0.22 - dist * 0.14;
+      let r = Math.min(255, Math.max(0, Math.round(baseR * shade)));
+      let g = Math.min(255, Math.max(0, Math.round(baseG * shade)));
+      let b = Math.min(255, Math.max(0, Math.round(baseB * shade)));
+
+      if (dist < 0.46) {
+        const mix = Math.pow((0.46 - dist) / 0.46, 1.15) * 0.88;
+        r = Math.round(r * (1 - mix) + 255 * mix);
+        g = Math.round(g * (1 - mix) + 255 * mix);
+        b = Math.round(b * (1 - mix) + 255 * mix);
+      }
+
+      writePixel(index, r, g, b);
+    }
+  }
+
+  const glyph = DEMO_LETTER_GLYPHS[initial] ?? DEMO_LETTER_GLYPHS.P;
+  const scale = 10;
+  const glyphWidth = 5 * scale;
+  const glyphHeight = 7 * scale;
+  const originX = Math.floor((size - glyphWidth) / 2);
+  const originY = Math.floor((size - glyphHeight) / 2);
+  for (let row = 0; row < glyph.length; row++) {
+    for (let col = 0; col < glyph[row].length; col++) {
+      if (glyph[row][col] !== "1") continue;
+      for (let py = 0; py < scale; py++) {
+        for (let px = 0; px < scale; px++) {
+          const x = originX + col * scale + px;
+          const y = originY + row * scale + py;
+          const index = (y * size + x) * 4;
+          writePixel(
+            index,
+            Math.max(30, Math.round(baseR * 0.35)),
+            Math.max(30, Math.round(baseG * 0.35)),
+            Math.max(30, Math.round(baseB * 0.35))
+          );
+        }
+      }
+    }
+  }
+
+  const image = nativeImage.createFromBitmap(buf, { width: size, height: size });
+  if (image.isEmpty()) throw new Error("Demo product image could not be created.");
+  return `data:image/jpeg;base64,${image.toJPEG(84).toString("base64")}`;
 }
 
 function databasePath() {
@@ -162,6 +290,7 @@ function productFromRow(row: Row): Product {
     stock: Number(row.stock),
     lowStockThreshold: Number(row.low_stock_threshold),
     isActive: Boolean(row.is_active),
+    imageDataUrl: resolveProductImage(String(row.image_data_url ?? "")),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at)
   };
@@ -199,6 +328,104 @@ function localDateRange(dateFrom: string, dateTo = dateFrom) {
   return { start: start.toISOString(), end: end.toISOString() };
 }
 
+function parseLocalDateInput(value: string) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+  const [year, month, day] = value.split("-").map(Number);
+  const date = new Date(year, month - 1, day);
+  if (date.getFullYear() !== year || date.getMonth() !== month - 1 || date.getDate() !== day) return null;
+  return date;
+}
+
+function toLocalDateInput(date: Date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function addLocalDays(date: Date, days: number) {
+  const next = new Date(date);
+  next.setDate(next.getDate() + days);
+  return next;
+}
+
+function inclusiveLocalDayCount(dateFrom: string, dateTo: string) {
+  const start = parseLocalDateInput(dateFrom);
+  const end = parseLocalDateInput(dateTo);
+  if (!start || !end || start > end) return 0;
+  return Math.floor((end.getTime() - start.getTime()) / 86_400_000) + 1;
+}
+
+function localDayKey(iso: string) {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "";
+  return toLocalDateInput(date);
+}
+
+function eachLocalDay(dateFrom: string, dateTo: string) {
+  const start = parseLocalDateInput(dateFrom);
+  const end = parseLocalDateInput(dateTo);
+  if (!start || !end || start > end) return [] as string[];
+  const days: string[] = [];
+  for (let cursor = new Date(start); cursor <= end; cursor = addLocalDays(cursor, 1)) {
+    days.push(toLocalDateInput(cursor));
+  }
+  return days;
+}
+
+function buildTrendBuckets(dateFrom: string, dateTo: string, granularity: SalesTrendGranularity) {
+  const start = parseLocalDateInput(dateFrom);
+  const end = parseLocalDateInput(dateTo);
+  if (!start || !end || start > end) return [] as Array<{ key: string; from: string; to: string }>;
+
+  if (granularity === "day") {
+    return eachLocalDay(dateFrom, dateTo).map((day) => ({ key: day, from: day, to: day }));
+  }
+
+  if (granularity === "week") {
+    const buckets: Array<{ key: string; from: string; to: string }> = [];
+    let cursor = new Date(start);
+    while (cursor <= end) {
+      const from = toLocalDateInput(cursor);
+      const weekEnd = addLocalDays(cursor, 6);
+      const to = toLocalDateInput(weekEnd > end ? end : weekEnd);
+      buckets.push({ key: from, from, to });
+      cursor = addLocalDays(cursor, 7);
+    }
+    return buckets;
+  }
+
+  if (granularity === "month") {
+    const buckets: Array<{ key: string; from: string; to: string }> = [];
+    let cursor = new Date(start.getFullYear(), start.getMonth(), 1);
+    while (cursor <= end) {
+      const monthStart = new Date(cursor.getFullYear(), cursor.getMonth(), 1);
+      const monthEnd = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 0);
+      const from = toLocalDateInput(monthStart < start ? start : monthStart);
+      const to = toLocalDateInput(monthEnd > end ? end : monthEnd);
+      buckets.push({
+        key: `${monthStart.getFullYear()}-${String(monthStart.getMonth() + 1).padStart(2, "0")}`,
+        from,
+        to
+      });
+      cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1);
+    }
+    return buckets;
+  }
+
+  const buckets: Array<{ key: string; from: string; to: string }> = [];
+  for (let year = start.getFullYear(); year <= end.getFullYear(); year += 1) {
+    const yearStart = new Date(year, 0, 1);
+    const yearEnd = new Date(year, 11, 31);
+    buckets.push({
+      key: String(year),
+      from: toLocalDateInput(yearStart < start ? start : yearStart),
+      to: toLocalDateInput(yearEnd > end ? end : yearEnd)
+    });
+  }
+  return buckets;
+}
+
 export class TruePOSServices {
   private db!: Database;
   private currentUser: User | null = null;
@@ -230,6 +457,8 @@ export class TruePOSServices {
     this.db.pragma(`legacy=4`);
     this.db.pragma(`key='${key.replaceAll("'", "''")}'`);
     this.db.pragma("journal_mode = WAL");
+    this.db.pragma("foreign_keys = ON");
+    this.db.pragma("busy_timeout = 5000");
   }
 
   close() {
@@ -270,9 +499,10 @@ export class TruePOSServices {
         cost REAL NOT NULL DEFAULT 0,
         price REAL NOT NULL DEFAULT 0,
         vat_rate REAL NOT NULL DEFAULT 0,
-        stock REAL NOT NULL DEFAULT 0,
+        stock REAL NOT NULL DEFAULT 0 CHECK(stock >= 0),
         low_stock_threshold REAL NOT NULL DEFAULT 0,
         is_active INTEGER NOT NULL DEFAULT 1,
+        image_data_url TEXT NOT NULL DEFAULT '',
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -282,15 +512,17 @@ export class TruePOSServices {
         old_price REAL NOT NULL,
         new_price REAL NOT NULL,
         changed_by TEXT NOT NULL,
-        created_at TEXT NOT NULL
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (product_id) REFERENCES products(id)
       );
       CREATE TABLE IF NOT EXISTS inventory_movements (
         id TEXT PRIMARY KEY,
         product_id TEXT NOT NULL,
-        type TEXT NOT NULL,
+        type TEXT NOT NULL CHECK(type IN ('stock_in', 'stock_out', 'adjustment', 'sale', 'return')),
         quantity REAL NOT NULL,
         note TEXT NOT NULL,
-        created_at TEXT NOT NULL
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (product_id) REFERENCES products(id)
       );
       CREATE TABLE IF NOT EXISTS sales (
         id TEXT PRIMARY KEY,
@@ -304,7 +536,10 @@ export class TruePOSServices {
         grand_total REAL NOT NULL,
         cashier_id TEXT NOT NULL,
         cashier_name TEXT NOT NULL,
-        status TEXT NOT NULL,
+        customer_name TEXT NOT NULL DEFAULT '',
+        customer_phone TEXT NOT NULL DEFAULT '',
+        bill_discount REAL NOT NULL DEFAULT 0,
+        status TEXT NOT NULL CHECK(status IN ('completed', 'returned', 'cancelled')),
         created_at TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS sale_lines (
@@ -318,7 +553,9 @@ export class TruePOSServices {
         unit_price REAL NOT NULL,
         unit_cost REAL NOT NULL DEFAULT 0,
         discount REAL NOT NULL,
-        vat_rate REAL NOT NULL
+        vat_rate REAL NOT NULL,
+        FOREIGN KEY (sale_id) REFERENCES sales(id),
+        FOREIGN KEY (product_id) REFERENCES products(id)
       );
       CREATE TABLE IF NOT EXISTS settings (
         key TEXT PRIMARY KEY,
@@ -331,6 +568,42 @@ export class TruePOSServices {
       this.db.exec(`UPDATE sale_lines
         SET unit_cost = COALESCE((SELECT cost FROM products WHERE products.id = sale_lines.product_id), 0)`);
     }
+    const productColumns = this.db.pragma("table_info(products)") as Row[];
+    if (!productColumns.some((column) => String(column.name) === "image_data_url")) {
+      this.db.exec("ALTER TABLE products ADD COLUMN image_data_url TEXT NOT NULL DEFAULT ''");
+    }
+    const saleColumns = this.db.pragma("table_info(sales)") as Row[];
+    if (!saleColumns.some((column) => String(column.name) === "customer_name")) {
+      this.db.exec("ALTER TABLE sales ADD COLUMN customer_name TEXT NOT NULL DEFAULT ''");
+    }
+    if (!saleColumns.some((column) => String(column.name) === "customer_phone")) {
+      this.db.exec("ALTER TABLE sales ADD COLUMN customer_phone TEXT NOT NULL DEFAULT ''");
+    }
+    if (!saleColumns.some((column) => String(column.name) === "bill_discount")) {
+      this.db.exec("ALTER TABLE sales ADD COLUMN bill_discount REAL NOT NULL DEFAULT 0");
+    }
+    // Enforce non-negative stock on existing DBs (CREATE CHECK only applies to fresh tables).
+    this.db.exec(`
+      CREATE TRIGGER IF NOT EXISTS products_stock_non_negative_insert
+      BEFORE INSERT ON products
+      FOR EACH ROW
+      WHEN NEW.stock < 0
+      BEGIN
+        SELECT RAISE(ABORT, 'Stock cannot go below zero.');
+      END;
+      CREATE TRIGGER IF NOT EXISTS products_stock_non_negative_update
+      BEFORE UPDATE OF stock ON products
+      FOR EACH ROW
+      WHEN NEW.stock < 0
+      BEGIN
+        SELECT RAISE(ABORT, 'Stock cannot go below zero.');
+      END;
+    `);
+    // Remove leftover cancelled drafts (usually failed prints) so they never clutter Today's sales.
+    this.db.exec(`
+      DELETE FROM sale_lines WHERE sale_id IN (SELECT id FROM sales WHERE status = 'cancelled');
+      DELETE FROM sales WHERE status = 'cancelled';
+    `);
   }
 
   private seed() {
@@ -338,6 +611,73 @@ export class TruePOSServices {
     if (!settings) {
       this.db.prepare("INSERT INTO settings (key, value) VALUES ('app', ?)").run(JSON.stringify(defaultSettings));
     }
+    this.seedDemoCatalog();
+  }
+
+  private seedDemoCatalog() {
+    const catalog: Array<{
+      sku: string;
+      barcode: string;
+      name: string;
+      category: string;
+      unit: string;
+      cost: number;
+      price: number;
+      vatRate: number;
+      stock: number;
+      lowStockThreshold: number;
+      color: [number, number, number];
+    }> = [
+      { sku: "DEMO-001", barcode: "8901001000001", name: "Basmati Rice 5kg", category: "Grocery", unit: "bag", cost: 650, price: 780, vatRate: 0, stock: 40, lowStockThreshold: 8, color: [210, 180, 120] },
+      { sku: "DEMO-002", barcode: "8901001000002", name: "Soybean Oil 1L", category: "Grocery", unit: "bottle", cost: 160, price: 185, vatRate: 0, stock: 60, lowStockThreshold: 12, color: [240, 190, 70] },
+      { sku: "DEMO-003", barcode: "8901001000003", name: "White Sugar 1kg", category: "Grocery", unit: "pack", cost: 110, price: 130, vatRate: 0, stock: 55, lowStockThreshold: 10, color: [245, 245, 248] },
+      { sku: "DEMO-004", barcode: "8901001000004", name: "Fresh Milk 1L", category: "Dairy", unit: "carton", cost: 70, price: 85, vatRate: 0, stock: 48, lowStockThreshold: 10, color: [236, 245, 255] },
+      { sku: "DEMO-005", barcode: "8901001000005", name: "Farm Eggs (12 pcs)", category: "Dairy", unit: "tray", cost: 140, price: 165, vatRate: 0, stock: 35, lowStockThreshold: 8, color: [252, 226, 170] },
+      { sku: "DEMO-006", barcode: "8901001000006", name: "Sandwich Bread", category: "Bakery", unit: "pcs", cost: 45, price: 55, vatRate: 0, stock: 30, lowStockThreshold: 6, color: [224, 180, 120] },
+      { sku: "DEMO-007", barcode: "8901001000007", name: "Potato 1kg", category: "Produce", unit: "kg", cost: 30, price: 40, vatRate: 0, stock: 80, lowStockThreshold: 15, color: [196, 154, 90] },
+      { sku: "DEMO-008", barcode: "8901001000008", name: "Onion 1kg", category: "Produce", unit: "kg", cost: 50, price: 65, vatRate: 0, stock: 70, lowStockThreshold: 15, color: [198, 120, 150] },
+      { sku: "DEMO-009", barcode: "8901001000009", name: "Black Tea 400g", category: "Grocery", unit: "pack", cost: 180, price: 220, vatRate: 0, stock: 42, lowStockThreshold: 8, color: [120, 72, 48] },
+      { sku: "DEMO-010", barcode: "8901001000010", name: "Bath Soap", category: "Personal Care", unit: "pcs", cost: 35, price: 45, vatRate: 5, stock: 90, lowStockThreshold: 20, color: [120, 190, 210] },
+      { sku: "DEMO-011", barcode: "8901001000011", name: "Shampoo 180ml", category: "Personal Care", unit: "bottle", cost: 120, price: 155, vatRate: 5, stock: 38, lowStockThreshold: 8, color: [90, 130, 210] },
+      { sku: "DEMO-012", barcode: "8901001000012", name: "Cream Biscuits", category: "Snacks", unit: "pack", cost: 25, price: 35, vatRate: 5, stock: 100, lowStockThreshold: 20, color: [232, 168, 100] },
+      { sku: "DEMO-013", barcode: "8901001000013", name: "Soft Drink 1.25L", category: "Beverages", unit: "bottle", cost: 55, price: 70, vatRate: 5, stock: 64, lowStockThreshold: 12, color: [220, 70, 70] },
+      { sku: "DEMO-014", barcode: "8901001000014", name: "Instant Noodles", category: "Snacks", unit: "pack", cost: 18, price: 25, vatRate: 5, stock: 120, lowStockThreshold: 24, color: [235, 140, 60] },
+      { sku: "DEMO-015", barcode: "8901001000015", name: "Masoor Dal 1kg", category: "Grocery", unit: "pack", cost: 120, price: 145, vatRate: 0, stock: 50, lowStockThreshold: 10, color: [196, 84, 72] }
+    ];
+
+    const insert = this.db.prepare(
+      `INSERT INTO products
+      (id, sku, barcode, name, category, unit, cost, price, vat_rate, stock, low_stock_threshold, is_active, image_data_url, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`
+    );
+    const findSku = this.db.prepare("SELECT id FROM products WHERE sku = ?");
+    const findBarcode = this.db.prepare("SELECT id FROM products WHERE barcode = ?");
+
+    this.db.transaction(() => {
+      for (const item of catalog) {
+        if (findSku.get(item.sku) || findBarcode.get(item.barcode)) continue;
+        const productId = uuid();
+        const createdAt = now();
+        const imageDataUrl = persistProductImage(productId, buildDemoProductImage(item.name, item.color));
+        insert.run(
+          productId,
+          item.sku,
+          item.barcode,
+          item.name,
+          item.category,
+          item.unit,
+          item.cost,
+          item.price,
+          item.vatRate,
+          item.stock,
+          item.lowStockThreshold,
+          imageDataUrl,
+          createdAt,
+          createdAt
+        );
+        if (item.stock !== 0) this.addMovement(productId, "stock_in", item.stock, "Demo opening stock");
+      }
+    })();
   }
 
   private requireUser() {
@@ -352,7 +692,8 @@ export class TruePOSServices {
   }
 
   async login(username: string, password: string) {
-    const row = this.db.prepare("SELECT * FROM users WHERE username = ?").get<Row>(username);
+    const normalized = String(username ?? "").trim();
+    const row = this.db.prepare("SELECT * FROM users WHERE username = ? COLLATE NOCASE").get<Row>(normalized);
     if (!row || !verifyPassword(password, String(row.password_hash))) throw new Error("Invalid username or password.");
     this.currentUser = userFromRow(row);
     return this.currentUser;
@@ -409,15 +750,18 @@ export class TruePOSServices {
     this.requireAdmin();
     const sku = String(input.sku ?? "").trim();
     const name = String(input.name ?? "").trim();
+    const category = String(input.category ?? "").trim();
     if (!sku || sku.length > 64) throw new Error("SKU must be 1-64 characters.");
     if (!name || name.length > 200) throw new Error("Product name must be 1-200 characters.");
+    if (!category || category.length > 100) throw new Error("Category is required (max 100 characters).");
     const cleanedBarcode = validateCode128Value(input.barcode || sku);
+    const productId = uuid();
     const product: Product = {
-      id: uuid(),
+      id: productId,
       sku,
       barcode: cleanedBarcode,
       name,
-      category: input.category?.trim() ?? "",
+      category,
       unit: input.unit?.trim() || "pcs",
       cost: requireFiniteNumber(input.cost ?? 0, "Cost", { min: 0 }),
       price: requireFiniteNumber(input.price ?? 0, "Price", { min: 0 }),
@@ -425,33 +769,37 @@ export class TruePOSServices {
       stock: requireFiniteNumber(input.stock ?? 0, "Opening stock", { min: 0 }),
       lowStockThreshold: requireFiniteNumber(input.lowStockThreshold ?? 0, "Low-stock threshold", { min: 0 }),
       isActive: input.isActive ?? true,
+      imageDataUrl: persistProductImage(productId, input.imageDataUrl),
       createdAt: now(),
       updatedAt: now()
     };
-    this.db
-      .prepare(
-        `INSERT INTO products
-        (id, sku, barcode, name, category, unit, cost, price, vat_rate, stock, low_stock_threshold, is_active, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      )
-      .run(
-        product.id,
-        product.sku,
-        product.barcode,
-        product.name,
-        product.category,
-        product.unit,
-        product.cost,
-        product.price,
-        product.vatRate,
-        product.stock,
-        product.lowStockThreshold,
-        product.isActive ? 1 : 0,
-        product.createdAt,
-        product.updatedAt
-      );
-    if (product.stock !== 0) this.addMovement(product.id, "stock_in", product.stock, "Opening stock");
-    return product;
+    this.db.transaction(() => {
+      this.db
+        .prepare(
+          `INSERT INTO products
+          (id, sku, barcode, name, category, unit, cost, price, vat_rate, stock, low_stock_threshold, is_active, image_data_url, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          product.id,
+          product.sku,
+          product.barcode,
+          product.name,
+          product.category,
+          product.unit,
+          product.cost,
+          product.price,
+          product.vatRate,
+          product.stock,
+          product.lowStockThreshold,
+          product.isActive ? 1 : 0,
+          product.imageDataUrl,
+          product.createdAt,
+          product.updatedAt
+        );
+      if (product.stock !== 0) this.addMovement(product.id, "stock_in", product.stock, "Opening stock");
+    })();
+    return productFromRow(this.db.prepare("SELECT * FROM products WHERE id = ?").get<Row>(product.id)!);
   }
 
   async updateProduct(id: string, input: Partial<ProductInput>) {
@@ -465,35 +813,41 @@ export class TruePOSServices {
     next.unit = String(next.unit ?? "").trim() || "pcs";
     if (!next.sku || next.sku.length > 64) throw new Error("SKU must be 1-64 characters.");
     if (!next.name || next.name.length > 200) throw new Error("Product name must be 1-200 characters.");
+    if (!next.category || next.category.length > 100) throw new Error("Category is required (max 100 characters).");
     next.cost = requireFiniteNumber(next.cost, "Cost", { min: 0 });
     next.price = requireFiniteNumber(next.price, "Price", { min: 0 });
     next.vatRate = requireFiniteNumber(next.vatRate, "VAT rate", { min: 0, max: 100 });
     next.lowStockThreshold = requireFiniteNumber(next.lowStockThreshold, "Low-stock threshold", { min: 0 });
     next.barcode = validateCode128Value(next.barcode || next.sku);
-    this.db
-      .prepare(
-        `UPDATE products SET sku=?, barcode=?, name=?, category=?, unit=?, cost=?, price=?, vat_rate=?,
-        low_stock_threshold=?, is_active=?, updated_at=? WHERE id=?`
-      )
-      .run(
-        next.sku,
-        next.barcode,
-        next.name,
-        next.category,
-        next.unit,
-        next.cost,
-        next.price,
-        next.vatRate,
-        next.lowStockThreshold,
-        next.isActive ? 1 : 0,
-        next.updatedAt,
-        id
-      );
-    if (Number(existing.price) !== next.price) {
+    const storedImage = persistProductImage(id, input.imageDataUrl !== undefined ? input.imageDataUrl : String(existing.image_data_url ?? ""));
+    next.imageDataUrl = storedImage;
+    this.db.transaction(() => {
       this.db
-        .prepare("INSERT INTO price_history (id, product_id, old_price, new_price, changed_by, created_at) VALUES (?, ?, ?, ?, ?, ?)")
-        .run(uuid(), id, Number(existing.price), next.price, user.id, now());
-    }
+        .prepare(
+          `UPDATE products SET sku=?, barcode=?, name=?, category=?, unit=?, cost=?, price=?, vat_rate=?,
+          low_stock_threshold=?, is_active=?, image_data_url=?, updated_at=? WHERE id=?`
+        )
+        .run(
+          next.sku,
+          next.barcode,
+          next.name,
+          next.category,
+          next.unit,
+          next.cost,
+          next.price,
+          next.vatRate,
+          next.lowStockThreshold,
+          next.isActive ? 1 : 0,
+          storedImage,
+          next.updatedAt,
+          id
+        );
+      if (Number(existing.price) !== next.price) {
+        this.db
+          .prepare("INSERT INTO price_history (id, product_id, old_price, new_price, changed_by, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+          .run(uuid(), id, Number(existing.price), next.price, user.id, now());
+      }
+    })();
     return productFromRow(this.db.prepare("SELECT * FROM products WHERE id = ?").get<Row>(id)!);
   }
 
@@ -505,72 +859,114 @@ export class TruePOSServices {
     return productFromRow(this.db.prepare("SELECT * FROM products WHERE id = ?").get<Row>(id)!);
   }
 
+  async deleteAllProducts() {
+    this.requireAdmin();
+    const result = this.db.prepare("UPDATE products SET is_active = 0, updated_at = ? WHERE is_active = 1").run(now());
+    return { deleted: Number(result.changes ?? 0) };
+  }
+
   async searchProducts(query: string) {
-    const q = `%${query.trim()}%`;
-    return this.db
+    const trimmed = query.trim();
+    const products = this.db
       .prepare(
-        `SELECT * FROM products
-        WHERE is_active = 1 AND (? = '%%' OR sku LIKE ? OR barcode LIKE ? OR name LIKE ? OR category LIKE ?)
-        ORDER BY name LIMIT 100`
+        trimmed
+          ? "SELECT * FROM products WHERE is_active = 1 ORDER BY name LIMIT 2000"
+          : "SELECT * FROM products WHERE is_active = 1 ORDER BY name LIMIT 100"
       )
-      .all<Row>(q, q, q, q, q)
+      .all<Row>()
       .map(productFromRow);
+
+    if (!trimmed) return products;
+    return rankSearchResults(products, trimmed).slice(0, 100);
   }
 
   async listProducts(params?: { query?: string; includeInactive?: boolean; lowStockOnly?: boolean; category?: string }) {
     const filters = params ?? {};
-    const query = `%${(filters.query ?? "").trim()}%`;
+    const trimmed = (filters.query ?? "").trim();
     const category = (filters.category ?? "").trim();
-    return this.db
+    const rows = this.db
       .prepare(
         `SELECT * FROM products
          WHERE (? = 1 OR is_active = 1)
-           AND (? = '%%' OR sku LIKE ? OR barcode LIKE ? OR name LIKE ? OR category LIKE ?)
            AND (? = '' OR category = ?)
            AND (? = 0 OR stock <= low_stock_threshold)
          ORDER BY is_active DESC, name ASC
-         LIMIT 500`
+         LIMIT 2000`
       )
-      .all<Row>(
-        filters.includeInactive ? 1 : 0,
-        query,
-        query,
-        query,
-        query,
-        query,
-        category,
-        category,
-        filters.lowStockOnly ? 1 : 0
-      )
+      .all<Row>(filters.includeInactive ? 1 : 0, category, category, filters.lowStockOnly ? 1 : 0)
       .map(productFromRow);
+
+    return trimmed ? rankSearchResults(rows, trimmed) : rows;
   }
 
   async importProductsCsv(csv: string) {
     this.requireAdmin();
     const parsed = Papa.parse<Record<string, string>>(csv, { header: true, skipEmptyLines: true });
     let imported = 0;
+    let updated = 0;
     let skipped = 0;
+    const errors: string[] = [];
+
     for (const row of parsed.data) {
-      try {
-        await this.createProduct({
-          sku: row.sku,
-          barcode: row.barcode || row.sku,
-          name: row.name,
-          category: row.category || "",
-          unit: row.unit || "pcs",
-          cost: Number(row.cost || 0),
-          price: Number(row.price || 0),
-          vatRate: Number(row.vatRate || row.vat_rate || 0),
-          stock: Number(row.stock || 0),
-          lowStockThreshold: Number(row.lowStockThreshold || row.low_stock_threshold || 0),
-          isActive: true
-        });
-        imported += 1;
-      } catch {
+      const sku = String(row.sku ?? "").trim();
+      const name = String(row.name ?? "").trim();
+      if (!sku || !name) {
         skipped += 1;
+        if (errors.length < 8) errors.push("A row was skipped because SKU or name was missing.");
+        continue;
+      }
+
+      const activeRaw = String(row.is_active ?? row.isActive ?? "1").trim().toLowerCase();
+      const isActive = !(activeRaw === "0" || activeRaw === "false" || activeRaw === "no" || activeRaw === "inactive");
+      const payload = {
+        sku,
+        barcode: String(row.barcode || sku).trim(),
+        name,
+        category: String(row.category || "").trim(),
+        unit: String(row.unit || "pcs").trim() || "pcs",
+        cost: Number(row.cost || 0),
+        price: Number(row.price || 0),
+        vatRate: Number(row.vatRate || row.vat_rate || 0),
+        stock: Number(row.stock || 0),
+        lowStockThreshold: Number(row.lowStockThreshold || row.low_stock_threshold || 0),
+        isActive,
+        imageDataUrl: ""
+      };
+
+      try {
+        const barcode = validateCode128Value(payload.barcode || sku);
+        payload.barcode = barcode;
+        const existing =
+          this.db.prepare("SELECT * FROM products WHERE sku = ? COLLATE NOCASE").get<Row>(sku) ??
+          this.db.prepare("SELECT * FROM products WHERE barcode = ?").get<Row>(barcode);
+        if (existing) {
+          await this.updateProduct(String(existing.id), {
+            ...payload,
+            // Keep current image unless CSV somehow includes inline image data.
+            imageDataUrl: undefined
+          });
+          // updateProduct ignores stock; set stock + reactivate explicitly for CSV restore.
+          this.db
+            .prepare("UPDATE products SET stock = ?, is_active = ?, updated_at = ? WHERE id = ?")
+            .run(requireFiniteNumber(payload.stock, "Opening stock", { min: 0 }), payload.isActive ? 1 : 0, now(), String(existing.id));
+          updated += 1;
+        } else {
+          await this.createProduct(payload);
+          imported += 1;
+        }
+      } catch (error) {
+        skipped += 1;
+        if (errors.length < 8) {
+          const raw = error instanceof Error ? error.message : "Unknown import error.";
+          const reason = /UNIQUE|constraint/i.test(raw)
+            ? "SKU or barcode already exists on another product."
+            : raw;
+          errors.push(`${sku}: ${reason}`);
+        }
       }
     }
-    return { imported, skipped };
+
+    return { imported, updated, skipped, errors };
   }
 
   async adjustInventory(productId: string, quantity: number, note: string, type: InventoryMovement["type"] = "adjustment") {
@@ -619,17 +1015,65 @@ export class TruePOSServices {
     return Number(this.db.prepare("SELECT stock FROM products WHERE id = ?").get<Row>(productId)?.stock ?? 0);
   }
 
-  async createAndPrintSale(window: BrowserWindowType, lines: CartLine[], payment: SalePayment) {
-    const sale = this.prepareSale(lines, payment);
-    await this.printSale(window, sale);
-    this.persistSale(sale);
+  async createAndPrintSale(
+    window: BrowserWindowType,
+    lines: CartLine[],
+    payment: SalePayment,
+    billDiscount = 0,
+    customer?: SaleCustomer,
+    /** Soft-reserved qty on other parked bills (renderer-held); charge must leave this stock free. */
+    reservedStockByProductId: Record<string, number> = {}
+  ) {
+    const sale = this.prepareSale(lines, payment, billDiscount, customer, reservedStockByProductId);
+    // Persist first so stock and the sale never diverge from a printed receipt.
+    this.persistSale(sale, reservedStockByProductId);
+    try {
+      await this.printSale(window, sale);
+    } catch (error) {
+      try {
+        // Print never finished — remove the draft sale so it does not appear as a cancelled bill
+        // and so a retry does not leave a pile of unused TP-###### numbers in Today's sales.
+        this.abortUnprintedSale(sale.id);
+      } catch {
+        // Prefer surfacing the print failure; stock reverse is best-effort recovery.
+      }
+      throw error;
+    }
     return sale;
   }
 
-  private prepareSale(lines: CartLine[], payment: SalePayment) {
+  /** Restock and delete a sale that was persisted only to print, then failed before a receipt was issued. */
+  private abortUnprintedSale(saleId: string) {
+    const sale = this.getSale(saleId);
+    if (sale.status !== "completed") return;
+    this.db.transaction(() => {
+      for (const line of sale.lines) {
+        this.db.prepare("UPDATE products SET stock = stock + ?, updated_at = ? WHERE id = ?").run(line.quantity, now(), line.productId);
+        this.addMovement(line.productId, "adjustment", line.quantity, `Print aborted ${sale.receiptNo}`);
+      }
+      this.db.prepare("DELETE FROM sale_lines WHERE sale_id = ?").run(saleId);
+      this.db.prepare("DELETE FROM sales WHERE id = ?").run(saleId);
+    })();
+  }
+
+  private normalizeSaleCustomer(customer?: SaleCustomer) {
+    return {
+      customerName: String(customer?.name ?? "").trim().slice(0, 120),
+      customerPhone: String(customer?.phone ?? "").trim().slice(0, 40)
+    };
+  }
+
+  private prepareSale(
+    lines: CartLine[],
+    payment: SalePayment,
+    billDiscount = 0,
+    customer?: SaleCustomer,
+    reservedStockByProductId: Record<string, number> = {}
+  ) {
     const user = this.requireUser();
-    const validated = this.validateSaleInput(lines, payment);
-    const totals = calculateTotals(validated.lines);
+    const validated = this.validateSaleInput(lines, payment, billDiscount, reservedStockByProductId);
+    const totals = calculateTotals(validated.lines, validated.billDiscount);
+    const saleCustomer = this.normalizeSaleCustomer(customer);
     return {
       id: uuid(),
       receiptNo: `TP-${Date.now()}-${uuid().slice(0, 4).toUpperCase()}`,
@@ -638,24 +1082,34 @@ export class TruePOSServices {
       totals,
       cashierId: user.id,
       cashierName: user.username,
-      status: "completed",
+      customerName: saleCustomer.customerName,
+      customerPhone: saleCustomer.customerPhone,
+      status: "completed" as const,
       createdAt: now()
     } satisfies PreparedSale;
   }
 
-  private persistSale(sale: PreparedSale) {
+  private persistSale(sale: PreparedSale, reservedStockByProductId: Record<string, number> = {}) {
     const tx = this.db.transaction(() => {
       for (const line of sale.lines) {
         const product = this.db.prepare("SELECT stock FROM products WHERE id = ?").get<Row>(line.productId);
         if (!product) throw new Error(`Product not found: ${line.name}`);
-        if (Number(product.stock) < line.quantity) throw new Error(`Insufficient stock for ${line.name}.`);
+        const reserved = Math.max(0, Number(reservedStockByProductId[line.productId] ?? 0) || 0);
+        const free = Number(product.stock) - reserved;
+        if (free < line.quantity) {
+          throw new Error(
+            reserved > 0
+              ? `Insufficient stock for ${line.name}: ${Number(product.stock)} on hand, ${reserved} reserved on parked bills.`
+              : `Insufficient stock for ${line.name}.`
+          );
+        }
       }
       this.db
         .prepare(
           `INSERT INTO sales
           (id, receipt_no, payment_method, payment_amount, subtotal, discount_total, taxable_total, vat_total, grand_total,
-           cashier_id, cashier_name, status, created_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+           cashier_id, cashier_name, customer_name, customer_phone, bill_discount, status, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .run(
           sale.id,
@@ -669,6 +1123,9 @@ export class TruePOSServices {
           sale.totals.grandTotal,
           sale.cashierId,
           sale.cashierName,
+          sale.customerName,
+          sale.customerPhone,
+          sale.totals.billDiscountTotal,
           sale.status,
           sale.createdAt
         );
@@ -689,41 +1146,54 @@ export class TruePOSServices {
 
   async returnSale(saleId: string) {
     this.requireAdmin();
-    const sale = this.getSale(saleId);
-    if (sale.status === "returned") throw new Error("Sale has already been returned.");
-    const tx = this.db.transaction(() => {
-      this.db.prepare("UPDATE sales SET status = 'returned' WHERE id = ?").run(saleId);
-      for (const line of sale.lines) {
-        this.db.prepare("UPDATE products SET stock = stock + ?, updated_at = ? WHERE id = ?").run(line.quantity, now(), line.productId);
-        this.addMovement(line.productId, "return", line.quantity, `Return ${sale.receiptNo}`);
-      }
+    return this.reverseCompletedSale(saleId, {
+      status: "returned",
+      note: (receiptNo) => `Return ${receiptNo}`,
+      allowCashier: false
     });
-    tx();
-    return { ...sale, status: "returned" as const };
   }
 
   async cancelSale(saleId: string) {
-    const user = this.requireUser();
-    const sale = this.getSale(saleId);
-    if (sale.status === "returned") throw new Error("Sale has already been cancelled.");
-    if (user.role !== "admin" && sale.cashierId !== user.id) {
-      throw new Error("You can only cancel your own sale.");
-    }
-    const tx = this.db.transaction(() => {
-      this.db.prepare("UPDATE sales SET status = 'returned' WHERE id = ?").run(saleId);
-      for (const line of sale.lines) {
-        this.db.prepare("UPDATE products SET stock = stock + ?, updated_at = ? WHERE id = ?").run(line.quantity, now(), line.productId);
-        this.addMovement(line.productId, "return", line.quantity, `Print cancelled ${sale.receiptNo}`);
-      }
+    return this.reverseCompletedSale(saleId, {
+      status: "cancelled",
+      note: (receiptNo) => `Cancelled ${receiptNo}`,
+      allowCashier: true
     });
-    tx();
-    return { ...sale, status: "returned" as const };
   }
 
-  async previewReceipt(lines: CartLine[], payment: SalePayment) {
+  private reverseCompletedSale(
+    saleId: string,
+    options: {
+      status: "returned" | "cancelled";
+      note: string | ((receiptNo: string) => string);
+      allowCashier: boolean;
+    }
+  ) {
     const user = this.requireUser();
-    const validated = this.validateSaleInput(lines, payment);
-    const totals = calculateTotals(validated.lines);
+    const sale = this.getSale(saleId);
+    if (sale.status === "returned") throw new Error("Sale has already been returned.");
+    if (sale.status === "cancelled") throw new Error("Sale has already been cancelled.");
+    if (sale.status !== "completed") throw new Error("Only completed sales can be reversed.");
+    if (user.role !== "admin") {
+      if (!options.allowCashier) throw new Error("Admin permission required.");
+      if (sale.cashierId !== user.id) throw new Error("You can only cancel your own sale.");
+    }
+    const noteText = typeof options.note === "string" ? options.note : options.note(sale.receiptNo);
+    this.db.transaction(() => {
+      this.db.prepare("UPDATE sales SET status = ? WHERE id = ?").run(options.status, saleId);
+      for (const line of sale.lines) {
+        this.db.prepare("UPDATE products SET stock = stock + ?, updated_at = ? WHERE id = ?").run(line.quantity, now(), line.productId);
+        this.addMovement(line.productId, "return", line.quantity, noteText);
+      }
+    })();
+    return { ...sale, status: options.status };
+  }
+
+  async previewReceipt(lines: CartLine[], payment: SalePayment, billDiscount = 0, customer?: SaleCustomer) {
+    const user = this.requireUser();
+    const validated = this.validateSaleInput(lines, payment, billDiscount);
+    const totals = calculateTotals(validated.lines, validated.billDiscount);
+    const saleCustomer = this.normalizeSaleCustomer(customer);
     const previewSale: Sale = {
       id: "preview",
       receiptNo: "Preview",
@@ -732,6 +1202,8 @@ export class TruePOSServices {
       totals,
       cashierId: user.id,
       cashierName: user.username,
+      customerName: saleCustomer.customerName,
+      customerPhone: saleCustomer.customerPhone,
       status: "completed",
       createdAt: now()
     };
@@ -741,16 +1213,48 @@ export class TruePOSServices {
       : buildReceiptHtml(previewSale, settings);
   }
 
-  async searchReceipts(receiptNumber: string) {
+  async searchReceipts(query: string) {
     this.requireUser();
-    const query = String(receiptNumber ?? "").trim();
-    if (!query) return [];
-    if (query.length > 80) throw new Error("Receipt number must not exceed 80 characters.");
-    if (!/^[a-z0-9-]+$/i.test(query)) throw new Error("Receipt number can only contain letters, numbers, and hyphens.");
-    const matches = this.db
-      .prepare("SELECT id FROM sales WHERE receipt_no LIKE ? ORDER BY created_at DESC LIMIT 20")
-      .all<Row>(`%${query}%`);
-    return matches.map((row) => this.getSale(String(row.id)));
+    const trimmed = String(query ?? "").trim();
+    if (!trimmed) return [];
+    if (trimmed.length > 120) throw new Error("Search text must not exceed 120 characters.");
+    if (!/^[\p{L}\p{N}\s\-+#._/()]+$/u.test(trimmed)) {
+      throw new Error("Search can only include letters, numbers, spaces, and common phone/receipt symbols.");
+    }
+
+    const rows = this.db
+      .prepare(
+        `SELECT id, receipt_no, customer_name, customer_phone, cashier_name, created_at
+         FROM sales
+         WHERE status = 'completed'
+         ORDER BY created_at DESC
+         LIMIT 1000`
+      )
+      .all<Row>();
+
+    const ranked = rankBySearchFields(rows, trimmed, (row) => ({
+      name: String(row.customer_name ?? ""),
+      sku: String(row.receipt_no ?? ""),
+      barcode: String(row.customer_phone ?? ""),
+      category: `${String(row.customer_phone ?? "")} ${String(row.cashier_name ?? "")}`.trim()
+    })).slice(0, 40);
+
+    return ranked.map((row) => this.getSale(String(row.id)));
+  }
+
+  async listSalesForDate(date: string, limit = 40) {
+    this.requireUser();
+    const capped = Math.max(1, Math.min(100, Math.floor(Number(limit) || 40)));
+    const { start, end } = localDateRange(date, date);
+    const rows = this.db
+      .prepare(
+        `SELECT id FROM sales
+         WHERE status = 'completed' AND created_at >= ? AND created_at < ?
+         ORDER BY created_at DESC
+         LIMIT ?`
+      )
+      .all<Row>(start, end, capped);
+    return rows.map((row) => this.getSale(String(row.id)));
   }
 
   async previewSavedReceipt(saleId: string) {
@@ -797,12 +1301,90 @@ export class TruePOSServices {
     };
   }
 
+  async getSalesTrend(dateFrom: string, dateTo: string): Promise<SalesTrendReport> {
+    const dayCount = inclusiveLocalDayCount(dateFrom, dateTo);
+    if (dayCount <= 0) return { granularity: "day", dayCount: 0, points: [] };
+
+    const granularity: SalesTrendGranularity =
+      dayCount <= 62 ? "day" : dayCount <= 270 ? "week" : dayCount <= 1461 ? "month" : "year";
+    const buckets = buildTrendBuckets(dateFrom, dateTo, granularity);
+    const { start, end } = localDateRange(dateFrom, dateTo);
+
+    const salesRows = this.db
+      .prepare(
+        `SELECT created_at, subtotal, discount_total, vat_total, grand_total
+         FROM sales WHERE status = 'completed' AND created_at >= ? AND created_at < ?`
+      )
+      .all<Row>(start, end);
+    const profitRows = this.db
+      .prepare(
+        `SELECT s.created_at AS created_at, ((l.unit_price - l.discount - l.unit_cost) * l.quantity) AS profit
+         FROM sale_lines l JOIN sales s ON s.id = l.sale_id
+         WHERE s.status = 'completed' AND s.created_at >= ? AND s.created_at < ?`
+      )
+      .all<Row>(start, end);
+
+    const daily = new Map<string, SalesReport>();
+    const ensureDay = (day: string) => {
+      let row = daily.get(day);
+      if (!row) {
+        row = { date: day, salesCount: 0, subtotal: 0, discountTotal: 0, vatTotal: 0, grandTotal: 0, profitEstimate: 0 };
+        daily.set(day, row);
+      }
+      return row;
+    };
+
+    for (const row of salesRows) {
+      const day = localDayKey(String(row.created_at ?? ""));
+      if (!day) continue;
+      const target = ensureDay(day);
+      target.salesCount += 1;
+      target.subtotal += Number(row.subtotal) || 0;
+      target.discountTotal += Number(row.discount_total) || 0;
+      target.vatTotal += Number(row.vat_total) || 0;
+      target.grandTotal += Number(row.grand_total) || 0;
+    }
+    for (const row of profitRows) {
+      const day = localDayKey(String(row.created_at ?? ""));
+      if (!day) continue;
+      ensureDay(day).profitEstimate += Number(row.profit) || 0;
+    }
+
+    const points = buckets.map((bucket) => {
+      const point: SalesReport = {
+        date: bucket.key,
+        salesCount: 0,
+        subtotal: 0,
+        discountTotal: 0,
+        vatTotal: 0,
+        grandTotal: 0,
+        profitEstimate: 0
+      };
+      for (const day of eachLocalDay(bucket.from, bucket.to)) {
+        const source = daily.get(day);
+        if (!source) continue;
+        point.salesCount += source.salesCount;
+        point.subtotal += source.subtotal;
+        point.discountTotal += source.discountTotal;
+        point.vatTotal += source.vatTotal;
+        point.grandTotal += source.grandTotal;
+        point.profitEstimate += source.profitEstimate;
+      }
+      return point;
+    });
+
+    return { granularity, dayCount, points };
+  }
+
   async getProductSales(dateFrom: string, dateTo: string): Promise<ProductSalesReport[]> {
     const { start, end } = localDateRange(dateFrom, dateTo);
     return this.db
       .prepare(
-        `SELECT l.product_id, l.sku, l.name, SUM(l.quantity) AS quantity, SUM((l.unit_price - l.discount) * l.quantity) AS revenue
-         FROM sale_lines l JOIN sales s ON s.id = l.sale_id
+        `SELECT l.product_id, l.sku, l.name, SUM(l.quantity) AS quantity, SUM((l.unit_price - l.discount) * l.quantity) AS revenue,
+                COALESCE(MAX(p.image_data_url), '') AS image_data_url
+         FROM sale_lines l
+         JOIN sales s ON s.id = l.sale_id
+         LEFT JOIN products p ON p.id = l.product_id
          WHERE s.status = 'completed' AND s.created_at >= ? AND s.created_at < ?
          GROUP BY l.product_id, l.sku, l.name ORDER BY revenue DESC`
       )
@@ -812,7 +1394,8 @@ export class TruePOSServices {
         sku: String(row.sku),
         name: String(row.name),
         quantity: Number(row.quantity),
-        revenue: Number(row.revenue)
+        revenue: Number(row.revenue),
+        imageDataUrl: resolveProductImage(String(row.image_data_url ?? ""))
       }));
   }
 
@@ -1193,10 +1776,16 @@ export class TruePOSServices {
     );
   }
 
-  private validateSaleInput(lines: CartLine[], payment: SalePayment) {
+  private validateSaleInput(
+    lines: CartLine[],
+    payment: SalePayment,
+    billDiscount = 0,
+    reservedStockByProductId: Record<string, number> = {}
+  ) {
     if (!Array.isArray(lines) || lines.length === 0) throw new Error("Sale must contain at least one product.");
     if (!payment || !(["cash", "card", "mobile"] as const).includes(payment.method)) throw new Error("Invalid payment method.");
     const amount = money(requireFiniteNumber(payment.amount, "Paid amount", { min: 0, max: 1_000_000_000 }));
+    const normalizedBillDiscount = money(requireFiniteNumber(billDiscount ?? 0, "Bill discount", { min: 0, max: 1_000_000_000 }));
     const normalized = new Map<string, CartLine & { unitCost: number }>();
 
     for (const input of lines) {
@@ -1231,10 +1820,22 @@ export class TruePOSServices {
 
     for (const line of normalized.values()) {
       const stock = Number(this.db.prepare("SELECT stock FROM products WHERE id = ?").get<Row>(line.productId)?.stock);
-      if (!Number.isFinite(stock) || stock < line.quantity) throw new Error(`Insufficient stock for ${line.name}.`);
+      const reserved = Math.max(0, Number(reservedStockByProductId[line.productId] ?? 0) || 0);
+      const free = (Number.isFinite(stock) ? stock : 0) - reserved;
+      if (!Number.isFinite(stock) || free < line.quantity) {
+        throw new Error(
+          reserved > 0
+            ? `Insufficient stock for ${line.name}: ${stock} on hand, ${reserved} reserved on parked bills.`
+            : `Insufficient stock for ${line.name}.`
+        );
+      }
     }
 
-    return { lines: [...normalized.values()], payment: { method: payment.method, amount } as SalePayment };
+    return {
+      lines: [...normalized.values()],
+      payment: { method: payment.method, amount } as SalePayment,
+      billDiscount: normalizedBillDiscount
+    };
   }
 
   private getSale(saleId: string): Sale {
@@ -1253,6 +1854,10 @@ export class TruePOSServices {
         discount: Number(line.discount),
         vatRate: Number(line.vat_rate)
       }));
+    const itemDiscountTotal = money(
+      lines.reduce((sum, line) => sum + line.quantity * line.discount, 0)
+    );
+    const billDiscountTotal = money(Number(row.bill_discount ?? 0));
     return {
       id: String(row.id),
       receiptNo: String(row.receipt_no),
@@ -1260,6 +1865,8 @@ export class TruePOSServices {
       payment: { method: row.payment_method as SalePayment["method"], amount: Number(row.payment_amount) },
       totals: {
         subtotal: Number(row.subtotal),
+        itemDiscountTotal,
+        billDiscountTotal,
         discountTotal: Number(row.discount_total),
         taxableTotal: Number(row.taxable_total),
         vatTotal: Number(row.vat_total),
@@ -1267,6 +1874,8 @@ export class TruePOSServices {
       },
       cashierId: String(row.cashier_id),
       cashierName: String(row.cashier_name),
+      customerName: String(row.customer_name ?? ""),
+      customerPhone: String(row.customer_phone ?? ""),
       status: row.status as Sale["status"],
       createdAt: String(row.created_at)
     };
@@ -1344,6 +1953,8 @@ export class TruePOSServices {
       totals: calculateTotals([{ productId: "sample", sku: "SAMPLE", barcode: "SAMPLE", name: "Sample Product", quantity: 1, unitPrice: 100, discount: 0, vatRate: 15 }]),
       cashierId: "sample",
       cashierName: "admin",
+      customerName: "",
+      customerPhone: "",
       status: "completed",
       createdAt: now()
     };
@@ -1378,10 +1989,6 @@ export class TruePOSServices {
     const fileClientId = configPaths.map(readGoogleClientId).find(Boolean) ?? "";
     return process.env.TRUEPOS_GOOGLE_CLIENT_ID?.trim() || fileClientId || bundledGoogleDriveClientId || legacySettingsClientId;
   }
-}
-
-function escapeHtml(value: string) {
-  return value.replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]!);
 }
 
 function base64Url(buffer: Buffer) {
