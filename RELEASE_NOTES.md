@@ -1,14 +1,16 @@
-# TruePOS v0.1.32
+# TruePOS v0.1.33
 
-## Clearer receipt typography
+## Reliable form controls
 
-- Replaced the Xprinter receipt font with Trebuchet MS, whose `I`, `i`, `l`, and `1` shapes remain distinct at small thermal-print sizes.
-- Existing Xprinter installations automatically move from the old receipt font to the clearer thermal-safe font.
-- Xprinter receipt previews now use the exact same font stack as the printed receipt.
-- Disabled font-family selection in Xprinter SDK mode because the thermal-safe font is enforced for consistent hardware output.
-- Windows printer mode retains its selectable font options.
-- Disabled font ligatures and slightly increased character spacing to improve small-text clarity without making all text bold.
+- Fixed a Settings race condition where delayed logo, save, print-test, calibration, or backup responses could restore older values.
+- New edits now always win over outdated asynchronous responses.
+- Google Drive connection and backup status can update without reverting newer backup schedule changes.
+- Removed disabled states from all input, select, textarea, checkbox, and range controls throughout the renderer.
+- Xprinter-fixed values now appear as clear informational fields instead of disabled controls.
+- Product code fields remain deliberately read-only because SKU and barcode values are assigned automatically; they are never disabled.
 
 ## Validation
 
-- Added regression checks for the thermal receipt font and ligature settings.
+- Added race-condition regression coverage for stale saves and delayed Google Drive responses.
+- Added an automated guard that fails if a disabled data-entry control is introduced in the renderer.
+- All interactive fields that are displayed remain usable; safety and permission rules continue to apply to action buttons.

@@ -2508,11 +2508,6 @@ th {
   box-shadow: var(--focus-ring);
 }
 
-.settings-range:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-
 .settings-range::-webkit-slider-runnable-track {
   height: 6px;
   border-radius: 999px;

@@ -1,11 +1,12 @@
 import { Download, Printer, RefreshCw, RotateCcw, Settings, Trash2, Upload } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useReducer, useState } from "react";
 import type { AppSettings, AppUpdateState, CartLine, Product, User } from "../../shared/contracts";
 import { DEFAULT_APP_SETTINGS } from "../../shared/default-settings";
 import { buildReceiptHtml, calculateTotals, formatBdt } from "../../shared/pos";
 import { XP365B_SAFE_RECEIPT_WIDTH_DOTS } from "../../shared/xprinter";
 import { api } from "../api";
 import { friendlyErrorMessage, type Notify } from "../errors";
+import { initialSettingsEditorState, settingsEditorReducer } from "../settings-editor-state";
 import { NumberInput, ReceiptPreview } from "../ui";
 
 function SoftwareUpdatePanel({ state, notify }: { state: AppUpdateState | null; notify: Notify }) {
@@ -97,7 +98,8 @@ function SoftwareUpdatePanel({ state, notify }: { state: AppUpdateState | null; 
 }
 
 export function SettingsScreen({ user, notify, updateState, onFactoryReset }: { user: User; notify: Notify; updateState: AppUpdateState | null; onFactoryReset: () => void }) {
-  const [settings, setSettings] = useState<AppSettings | null>(null);
+  const [settingsState, dispatchSettings] = useReducer(settingsEditorReducer, initialSettingsEditorState);
+  const settings = settingsState.settings;
   const [printers, setPrinters] = useState<string[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
   const [labelProductId, setLabelProductId] = useState("");
@@ -108,7 +110,7 @@ export function SettingsScreen({ user, notify, updateState, onFactoryReset }: { 
       api.settings.get(),
       api.products.list({ includeInactive: false }).catch(() => api.products.search(""))
     ]);
-    setSettings(nextSettings);
+    dispatchSettings({ type: "load", settings: nextSettings });
     setProducts(nextProducts);
     setLabelProductId((current) => (current && nextProducts.some((product) => product.id === current) ? current : nextProducts[0]?.id ?? ""));
     api.printing.listPrinters().then(setPrinters).catch((err) => {
@@ -152,11 +154,17 @@ export function SettingsScreen({ user, notify, updateState, onFactoryReset }: { 
     : buildReceiptHtml(previewSale, settings);
 
   const updateReceipt = (receipt: Partial<AppSettings["receipt"]>) => {
-    setSettings({ ...settings, receipt: { ...settings.receipt, ...receipt } });
+    dispatchSettings({
+      type: "edit",
+      update: (current) => ({ ...current, receipt: { ...current.receipt, ...receipt } })
+    });
   };
 
   const updateBarcode = (barcode: Partial<AppSettings["barcode"]>) => {
-    setSettings({ ...settings, barcode: { ...settings.barcode, ...barcode } });
+    dispatchSettings({
+      type: "edit",
+      update: (current) => ({ ...current, barcode: { ...current.barcode, ...barcode } })
+    });
   };
 
   const handleLogoUpload = (file?: File) => {
@@ -181,8 +189,11 @@ export function SettingsScreen({ user, notify, updateState, onFactoryReset }: { 
   };
 
   const save = async () => {
+    const startedRevision = settingsState.revision;
+    const snapshot = settings;
     try {
-      setSettings(await api.settings.update(settings));
+      const saved = await api.settings.update(snapshot);
+      dispatchSettings({ type: "async-result", settings: saved, startedRevision });
       notify("Settings saved.");
     } catch (err) {
       notify(friendlyErrorMessage(err, "Settings could not be saved. Check the entered values and try again."), "error");
@@ -197,12 +208,14 @@ export function SettingsScreen({ user, notify, updateState, onFactoryReset }: { 
     ) {
       return;
     }
+    const startedRevision = settingsState.revision;
     try {
       const next = {
         ...DEFAULT_APP_SETTINGS,
         googleDrive: settings.googleDrive
       };
-      setSettings(await api.settings.update(next));
+      const saved = await api.settings.update(next);
+      dispatchSettings({ type: "async-result", settings: saved, startedRevision });
       notify("Settings restored to defaults.");
     } catch (err) {
       notify(friendlyErrorMessage(err, "Defaults could not be restored. Please try again."), "error");
@@ -220,9 +233,12 @@ export function SettingsScreen({ user, notify, updateState, onFactoryReset }: { 
   };
 
   const connectGoogleDrive = async () => {
+    const startedRevision = settingsState.revision;
+    const snapshot = settings;
     try {
-      setSettings(await api.settings.update(settings));
-      setSettings(await api.backup.connectGoogleDrive());
+      await api.settings.update(snapshot);
+      const connected = await api.backup.connectGoogleDrive();
+      dispatchSettings({ type: "async-google-result", settings: connected, startedRevision });
       notify("Google Drive connected.");
     } catch (err) {
       notify(friendlyErrorMessage(err, "Google Drive could not be connected. Check the internet connection and try again."), "error");
@@ -230,9 +246,12 @@ export function SettingsScreen({ user, notify, updateState, onFactoryReset }: { 
   };
 
   const backupGoogleDriveNow = async () => {
+    const startedRevision = settingsState.revision;
+    const snapshot = settings;
     try {
-      setSettings(await api.settings.update(settings));
-      setSettings(await api.backup.backupGoogleDriveNow());
+      await api.settings.update(snapshot);
+      const backedUp = await api.backup.backupGoogleDriveNow();
+      dispatchSettings({ type: "async-google-result", settings: backedUp, startedRevision });
       notify("Google Drive backup uploaded.");
     } catch (err) {
       notify(friendlyErrorMessage(err, "The Google Drive backup could not be uploaded. Check the connection and try again."), "error");
@@ -240,8 +259,10 @@ export function SettingsScreen({ user, notify, updateState, onFactoryReset }: { 
   };
 
   const disconnectGoogleDrive = async () => {
+    const startedRevision = settingsState.revision;
     try {
-      setSettings(await api.backup.disconnectGoogleDrive());
+      const disconnected = await api.backup.disconnectGoogleDrive();
+      dispatchSettings({ type: "async-google-result", settings: disconnected, startedRevision });
       notify("Google Drive disconnected.");
     } catch (err) {
       notify(friendlyErrorMessage(err, "Google Drive could not be disconnected. Please try again."), "error");
@@ -262,9 +283,11 @@ export function SettingsScreen({ user, notify, updateState, onFactoryReset }: { 
   };
 
   const testReceipt = async () => {
+    const startedRevision = settingsState.revision;
+    const snapshot = settings;
     try {
-      const saved = await api.settings.update(settings);
-      setSettings(saved);
+      const saved = await api.settings.update(snapshot);
+      dispatchSettings({ type: "async-result", settings: saved, startedRevision });
       await api.printing.testReceipt();
       notify("Receipt test sent to the XP-365B.");
     } catch (err) {
@@ -277,9 +300,11 @@ export function SettingsScreen({ user, notify, updateState, onFactoryReset }: { 
       notify("Add or select a product before printing a test label.", "error");
       return;
     }
+    const startedRevision = settingsState.revision;
+    const snapshot = settings;
     try {
-      const saved = await api.settings.update(settings);
-      setSettings(saved);
+      const saved = await api.settings.update(snapshot);
+      dispatchSettings({ type: "async-result", settings: saved, startedRevision });
       await api.printing.printBarcode(selectedLabelProduct.id, Math.max(1, labelQuantity));
       notify("Test labels sent to the XP-365B.");
     } catch (err) {
@@ -289,9 +314,11 @@ export function SettingsScreen({ user, notify, updateState, onFactoryReset }: { 
 
   const calibrateLabels = async () => {
     if (!window.confirm("Label calibration feeds several labels while the XP-365B learns the 45x35mm gap. Continue?")) return;
+    const startedRevision = settingsState.revision;
+    const snapshot = settings;
     try {
-      const saved = await api.settings.update(settings);
-      setSettings(saved);
+      const saved = await api.settings.update(snapshot);
+      dispatchSettings({ type: "async-result", settings: saved, startedRevision });
       await api.printing.calibrateLabels();
       notify("XP-365B label gap calibration completed.");
     } catch (err) {
@@ -334,26 +361,36 @@ export function SettingsScreen({ user, notify, updateState, onFactoryReset }: { 
                 Printer mode
                 <select value={settings.printerMode} onChange={(event) => {
                   const printerMode = event.target.value as "windows" | "xprinter";
-                  setSettings({
-                    ...settings,
-                    printerMode,
-                    receipt: printerMode === "xprinter" ? { ...settings.receipt, widthMm: 80 } : settings.receipt,
-                    barcode: printerMode === "xprinter" ? { ...settings.barcode, labelWidthMm: 45, labelHeightMm: 35 } : settings.barcode
+                  dispatchSettings({
+                    type: "edit",
+                    update: (current) => ({
+                      ...current,
+                      printerMode,
+                      receipt: printerMode === "xprinter" ? { ...current.receipt, widthMm: 80 } : current.receipt,
+                      barcode: printerMode === "xprinter" ? { ...current.barcode, labelWidthMm: 45, labelHeightMm: 35 } : current.barcode
+                    })
                   });
                 }}>
                   <option value="windows">Windows printer driver</option>
                   <option value="xprinter">Xprinter XP-365B SDK (USB)</option>
                 </select>
               </label>
-              <label>
-                Receipt printer
-                <select disabled={settings.printerMode === "xprinter"} value={settings.receiptPrinter} onChange={(event) => setSettings({ ...settings, receiptPrinter: event.target.value })}>
-                  <option value="">Default printer</option>
-                  {printers.map((printer) => (
-                    <option key={printer}>{printer}</option>
-                  ))}
-                </select>
-              </label>
+              {settings.printerMode === "xprinter" ? (
+                <div className="computed-field"><span>Receipt printer</span><strong>XP-365B direct USB</strong></div>
+              ) : (
+                <label>
+                  Receipt printer
+                  <select value={settings.receiptPrinter} onChange={(event) => {
+                    const receiptPrinter = event.target.value;
+                    dispatchSettings({ type: "edit", update: (current) => ({ ...current, receiptPrinter }) });
+                  }}>
+                    <option value="">Default printer</option>
+                    {printers.map((printer) => (
+                      <option key={printer}>{printer}</option>
+                    ))}
+                  </select>
+                </label>
+              )}
             </div>
             {settings.printerMode === "xprinter" && (
               <div className="notice neutral driver-setup-notice">
@@ -399,21 +436,24 @@ export function SettingsScreen({ user, notify, updateState, onFactoryReset }: { 
                   }}
                 />
               </label>
-              <label>
-                {settings.printerMode === "xprinter" ? "Horizontally centered for XP-365B" : `Move left/right ${settings.receipt.logoOffsetX}px`}
-                <input
-                  className="settings-range"
-                  disabled={settings.printerMode === "xprinter"}
-                  type="range"
-                  min={-80}
-                  max={80}
-                  value={settings.printerMode === "xprinter" ? 0 : settings.receipt.logoOffsetX}
-                  onChange={(event) => updateReceipt({ logoOffsetX: Number(event.target.value) })}
-                  style={{
-                    ["--range-progress" as string]: `${(( (settings.printerMode === "xprinter" ? 0 : settings.receipt.logoOffsetX) + 80) / 160) * 100}%`
-                  }}
-                />
-              </label>
+              {settings.printerMode === "xprinter" ? (
+                <div className="computed-field"><span>Logo alignment</span><strong>Centered automatically</strong></div>
+              ) : (
+                <label>
+                  Move left/right {settings.receipt.logoOffsetX}px
+                  <input
+                    className="settings-range"
+                    type="range"
+                    min={-80}
+                    max={80}
+                    value={settings.receipt.logoOffsetX}
+                    onChange={(event) => updateReceipt({ logoOffsetX: Number(event.target.value) })}
+                    style={{
+                      ["--range-progress" as string]: `${((settings.receipt.logoOffsetX + 80) / 160) * 100}%`
+                    }}
+                  />
+                </label>
+              )}
               <label>
                 Move down {Math.max(0, settings.receipt.logoOffsetY)}px
                 <input
@@ -434,7 +474,10 @@ export function SettingsScreen({ user, notify, updateState, onFactoryReset }: { 
             </button>
             <label>
               Shop name
-              <input value={settings.shopName} onChange={(event) => setSettings({ ...settings, shopName: event.target.value })} />
+              <input value={settings.shopName} onChange={(event) => {
+                const shopName = event.target.value;
+                dispatchSettings({ type: "edit", update: (current) => ({ ...current, shopName }) });
+              }} />
             </label>
             <label>
               Header text
@@ -453,22 +496,30 @@ export function SettingsScreen({ user, notify, updateState, onFactoryReset }: { 
                   <option value="bn">Bangla ready</option>
                 </select>
               </label>
-              <label>
-                Paper width
-                <select disabled={settings.printerMode === "xprinter"} value={settings.receipt.widthMm} onChange={(event) => updateReceipt({ widthMm: Number(event.target.value) as 58 | 80 })}>
-                  <option value={58}>58mm</option>
-                  <option value={80}>80mm</option>
-                </select>
-              </label>
-              <label>
-                Font
-                <select disabled={settings.printerMode === "xprinter"} value={settings.receipt.fontFamily} onChange={(event) => updateReceipt({ fontFamily: event.target.value })}>
-                  <option value="Trebuchet MS">Trebuchet MS (clear I / l / 1)</option>
-                  <option value="Consolas">Consolas</option>
-                  <option value="Arial">Arial</option>
-                  <option value="Segoe UI">Segoe UI</option>
-                </select>
-              </label>
+              {settings.printerMode === "xprinter" ? (
+                <div className="computed-field"><span>Paper width</span><strong>80mm fixed</strong></div>
+              ) : (
+                <label>
+                  Paper width
+                  <select value={settings.receipt.widthMm} onChange={(event) => updateReceipt({ widthMm: Number(event.target.value) as 58 | 80 })}>
+                    <option value={58}>58mm</option>
+                    <option value={80}>80mm</option>
+                  </select>
+                </label>
+              )}
+              {settings.printerMode === "xprinter" ? (
+                <div className="computed-field"><span>Font</span><strong>Trebuchet MS (thermal safe)</strong></div>
+              ) : (
+                <label>
+                  Font
+                  <select value={settings.receipt.fontFamily} onChange={(event) => updateReceipt({ fontFamily: event.target.value })}>
+                    <option value="Trebuchet MS">Trebuchet MS (clear I / l / 1)</option>
+                    <option value="Consolas">Consolas</option>
+                    <option value="Arial">Arial</option>
+                    <option value="Segoe UI">Segoe UI</option>
+                  </select>
+                </label>
+              )}
               <NumberInput label="Font size" value={settings.receipt.fontSize} onChange={(value) => updateReceipt({ fontSize: value })} min={1} allowDecimal={false} />
               <NumberInput label="Padding" value={settings.receipt.padding} onChange={(value) => updateReceipt({ padding: value })} min={0} allowDecimal={false} />
             </div>
@@ -494,15 +545,22 @@ export function SettingsScreen({ user, notify, updateState, onFactoryReset }: { 
                 <p>Code128 labels for product stickers</p>
               </div>
             </div>
-            <label>
-              Barcode printer
-              <select disabled={settings.printerMode === "xprinter"} value={settings.barcodePrinter} onChange={(event) => setSettings({ ...settings, barcodePrinter: event.target.value })}>
-                <option value="">Default printer</option>
-                {printers.map((printer) => (
-                  <option key={printer}>{printer}</option>
-                ))}
-              </select>
-            </label>
+            {settings.printerMode === "xprinter" ? (
+              <div className="computed-field"><span>Barcode printer</span><strong>XP-365B direct USB</strong></div>
+            ) : (
+              <label>
+                Barcode printer
+                <select value={settings.barcodePrinter} onChange={(event) => {
+                  const barcodePrinter = event.target.value;
+                  dispatchSettings({ type: "edit", update: (current) => ({ ...current, barcodePrinter }) });
+                }}>
+                  <option value="">Default printer</option>
+                  {printers.map((printer) => (
+                    <option key={printer}>{printer}</option>
+                  ))}
+                </select>
+              </label>
+            )}
             <div className="form-section">
               <NumberInput label="Label width mm" value={settings.barcode.labelWidthMm} onChange={(value) => updateBarcode({ labelWidthMm: value })} min={1} />
               <NumberInput label="Label height mm" value={settings.barcode.labelHeightMm} onChange={(value) => updateBarcode({ labelHeightMm: value })} min={1} />
@@ -569,8 +627,13 @@ export function SettingsScreen({ user, notify, updateState, onFactoryReset }: { 
                   <input
                     type="checkbox"
                     checked={settings.googleDrive.autoBackupEnabled}
-                    disabled={!settings.googleDrive.connected}
-                    onChange={(event) => setSettings({ ...settings, googleDrive: { ...settings.googleDrive, autoBackupEnabled: event.target.checked } })}
+                    onChange={(event) => {
+                      const autoBackupEnabled = event.target.checked;
+                      dispatchSettings({
+                        type: "edit",
+                        update: (current) => ({ ...current, googleDrive: { ...current.googleDrive, autoBackupEnabled } })
+                      });
+                    }}
                   />
                   Automatic daily backup
                 </label>
@@ -579,7 +642,13 @@ export function SettingsScreen({ user, notify, updateState, onFactoryReset }: { 
                   <input
                     type="time"
                     value={settings.googleDrive.backupTime}
-                    onChange={(event) => setSettings({ ...settings, googleDrive: { ...settings.googleDrive, backupTime: event.target.value } })}
+                    onChange={(event) => {
+                      const backupTime = event.target.value;
+                      dispatchSettings({
+                        type: "edit",
+                        update: (current) => ({ ...current, googleDrive: { ...current.googleDrive, backupTime } })
+                      });
+                    }}
                   />
                 </label>
               </div>
