@@ -63,6 +63,12 @@ const defaultSettings: AppSettings = DEFAULT_APP_SETTINGS;
 function mergeSettings(settings: Partial<AppSettings>): AppSettings {
   const storedPrinterMode = String((settings as { printerMode?: string }).printerMode ?? "");
   const printerMode = storedPrinterMode === "escpos" ? "xprinter" : storedPrinterMode === "windows" || storedPrinterMode === "xprinter" ? storedPrinterMode : defaultSettings.printerMode;
+  const storedReceiptFont = String(settings.receipt?.fontFamily ?? "");
+  const receiptFontFamily = printerMode === "xprinter"
+    ? defaultSettings.receipt.fontFamily
+    : ["Trebuchet MS", "Consolas", "Arial", "Segoe UI"].includes(storedReceiptFont)
+      ? storedReceiptFont
+      : defaultSettings.receipt.fontFamily;
   return {
     ...defaultSettings,
     ...settings,
@@ -70,6 +76,7 @@ function mergeSettings(settings: Partial<AppSettings>): AppSettings {
     receipt: {
       ...defaultSettings.receipt,
       ...settings.receipt,
+      fontFamily: receiptFontFamily,
       logoOffsetY: Math.max(0, Number(settings.receipt?.logoOffsetY ?? defaultSettings.receipt.logoOffsetY) || 0),
       logoScale: Math.min(200, Math.max(25, Number(settings.receipt?.logoScale ?? defaultSettings.receipt.logoScale) || 100))
     },

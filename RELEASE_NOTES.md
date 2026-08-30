@@ -1,14 +1,14 @@
-# TruePOS v0.1.31
+# TruePOS v0.1.32
 
-## Product catalog cleanup
+## Clearer receipt typography
 
-- Removed the automatic 15-product demo catalog from new installations.
-- Added a one-time cleanup for demo products already created by older versions.
-- Unused, unchanged demo products are removed together with their generated images and opening-stock records.
-- Demo products referenced by real sales or edited by the user are safely deactivated instead of deleting historical data.
-- User-created products, inventory records, and sales history are preserved.
+- Replaced the Xprinter receipt font with Trebuchet MS, whose `I`, `i`, `l`, and `1` shapes remain distinct at small thermal-print sizes.
+- Existing Xprinter installations automatically move from the old receipt font to the clearer thermal-safe font.
+- Xprinter receipt previews now use the exact same font stack as the printed receipt.
+- Disabled font-family selection in Xprinter SDK mode because the thermal-safe font is enforced for consistent hardware output.
+- Windows printer mode retains its selectable font options.
+- Disabled font ligatures and slightly increased character spacing to improve small-text clarity without making all text bold.
 
-## Reliability
+## Validation
 
-- The cleanup is recorded after it runs so future user-created products cannot be mistaken for legacy demo data.
-- Receipt-preview sample content remains preview-only and is never inserted into the product catalog.
+- Added regression checks for the thermal receipt font and ligature settings.

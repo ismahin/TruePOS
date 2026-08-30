@@ -10,7 +10,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   receipt: {
     widthMm: 80,
     fontSize: 12,
-    fontFamily: "Consolas",
+    fontFamily: "Trebuchet MS",
     language: "en",
     padding: 8,
     logoDataUrl: "",

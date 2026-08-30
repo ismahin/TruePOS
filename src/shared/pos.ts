@@ -109,8 +109,9 @@ export function buildReceiptHtml(
   const compact = !options.widthPx && receipt.widthMm === 58;
   const width = options.widthPx ? `${options.widthPx}px` : `${receipt.widthMm}mm`;
   const baseFontSize = thermal ? Math.max(19, Math.min(25, Math.round(receipt.fontSize * 1.7))) : Math.max(11, receipt.fontSize);
-  const configuredFont = ["Arial", "Segoe UI", "Consolas"].includes(receipt.fontFamily) ? receipt.fontFamily : "Arial";
-  const fontFamily = thermal ? "Verdana" : configuredFont;
+  const configuredFont = ["Trebuchet MS", "Arial", "Segoe UI", "Consolas"].includes(receipt.fontFamily) ? receipt.fontFamily : "Trebuchet MS";
+  // Trebuchet keeps uppercase I, lowercase l, and numeral 1 visibly different at thermal-printer resolution.
+  const fontFamily = thermal ? "Trebuchet MS" : configuredFont;
   const padding = thermal ? Math.max(16, Math.min(26, Math.round(receipt.padding * 2.25))) : Math.max(6, receipt.padding);
   const metaLabelWidth = thermal ? 112 : compact ? 62 : 78;
   const quantityColumnWidth = thermal ? 52 : compact ? 30 : 40;
@@ -154,7 +155,7 @@ export function buildReceiptHtml(
     @page{margin:0}
     *{box-sizing:border-box}
     html,body{margin:0;padding:0;width:${width};background:#fff;color:#000;overflow:hidden}
-    body{font-family:"${fontFamily}",Tahoma,Arial,sans-serif;font-size:${baseFontSize}px;font-weight:400;line-height:1.24;letter-spacing:.05px;text-rendering:geometricPrecision;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+    body{font-family:"${fontFamily}",Verdana,Tahoma,Arial,sans-serif;font-size:${baseFontSize}px;font-weight:400;line-height:1.24;letter-spacing:.08px;font-variant-ligatures:none;text-rendering:geometricPrecision;-webkit-print-color-adjust:exact;print-color-adjust:exact}
     .receipt{width:100%;padding:${padding}px}
     .logo-wrap{width:100%;display:flex;justify-content:center;align-items:center;margin:${Math.max(0, receipt.logoOffsetY * 2)}px auto ${thermal ? 16 : 8}px;transform:translateX(${thermal ? 0 : receipt.logoOffsetX}px)}
     .logo{display:block;margin:0 auto;width:${logoWidth}${logoUnit};height:${logoHeight}${logoUnit};max-width:100%;object-fit:contain;object-position:center center;filter:grayscale(1) contrast(1.4)}

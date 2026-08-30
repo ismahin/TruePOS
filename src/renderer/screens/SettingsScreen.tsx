@@ -462,7 +462,8 @@ export function SettingsScreen({ user, notify, updateState, onFactoryReset }: { 
               </label>
               <label>
                 Font
-                <select value={settings.receipt.fontFamily} onChange={(event) => updateReceipt({ fontFamily: event.target.value })}>
+                <select disabled={settings.printerMode === "xprinter"} value={settings.receipt.fontFamily} onChange={(event) => updateReceipt({ fontFamily: event.target.value })}>
+                  <option value="Trebuchet MS">Trebuchet MS (clear I / l / 1)</option>
                   <option value="Consolas">Consolas</option>
                   <option value="Arial">Arial</option>
                   <option value="Segoe UI">Segoe UI</option>

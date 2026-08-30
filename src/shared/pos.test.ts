@@ -136,6 +136,8 @@ describe("POS calculations", () => {
 
     const html = buildReceiptHtml(sale, settings, { widthPx: 568, thermal: true });
     expect(html).toContain("width:568px");
+    expect(html).toContain('font-family:"Trebuchet MS",Verdana,Tahoma,Arial,sans-serif');
+    expect(html).toContain("font-variant-ligatures:none");
     expect(html).toContain("Description");
     expect(html).toContain("Payable");
     expect(html).toContain("All amounts in BDT");
