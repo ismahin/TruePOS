@@ -24,8 +24,8 @@ async function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1360,
     height: 860,
-    minWidth: 1180,
-    minHeight: 720,
+    minWidth: 900,
+    minHeight: 600,
     title: "TruePOS",
     icon: appIconPath,
     backgroundColor: "#ffffff",

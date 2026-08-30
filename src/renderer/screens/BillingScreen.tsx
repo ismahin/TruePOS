@@ -54,6 +54,8 @@ export function BillingScreen({ notify, active }: { notify: Notify; active: bool
   const [stockByProductId, setStockByProductId] = useState<Record<string, { stock: number; unit: string }>>({});
   const [busy, setBusy] = useState(false);
   const scanInputRef = useRef<HTMLInputElement>(null);
+  const cartPanelRef = useRef<HTMLDivElement>(null);
+  const lastAddedProductIdRef = useRef("");
   const nextHoldNumberRef = useRef(1);
   const billDiscountRef = useRef(billDiscount);
   const paidRef = useRef(paid);
@@ -91,6 +93,17 @@ export function BillingScreen({ notify, active }: { notify: Notify; active: bool
       lastReceiptNo
     });
   }, [cart, customerName, customerPhone, paid, billDiscount, paymentMethod, lastSaleId, lastReceiptNo]);
+
+  useEffect(() => {
+    const productId = lastAddedProductIdRef.current;
+    if (!productId || !active) return;
+    const frame = window.requestAnimationFrame(() => {
+      const row = cartPanelRef.current?.querySelector<HTMLElement>(`[data-cart-product-id="${productId}"]`);
+      row?.scrollIntoView({ block: "nearest", inline: "nearest" });
+      lastAddedProductIdRef.current = "";
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [cart, active]);
 
   useEffect(() => {
     if (heldCarts.length === 0) return;
@@ -536,8 +549,10 @@ export function BillingScreen({ notify, active }: { notify: Notify; active: bool
           );
           return current;
         }
+        lastAddedProductIdRef.current = product.id;
         return current.map((line) => (line.productId === product.id ? { ...line, quantity: line.quantity + 1 } : line));
       }
+      lastAddedProductIdRef.current = product.id;
       return [
         ...current,
         {
@@ -844,7 +859,7 @@ export function BillingScreen({ notify, active }: { notify: Notify; active: bool
           </div>
         </div>
       </div>
-      <div className="panel cart-panel">
+      <div ref={cartPanelRef} className="panel cart-panel">
         <div className="screen-heading">
           <div>
             <h2>Current sale</h2>
@@ -902,7 +917,11 @@ export function BillingScreen({ notify, active }: { notify: Notify; active: bool
             const atStockLimit = available !== undefined && line.quantity >= available;
             const overStock = available !== undefined && line.quantity > available;
             return (
-              <div className={`cart-line ${overStock || atStockLimit ? "cart-line-stock-warn" : ""}`} key={line.productId}>
+              <div
+                className={`cart-line ${overStock || atStockLimit ? "cart-line-stock-warn" : ""}`}
+                key={line.productId}
+                data-cart-product-id={line.productId}
+              >
                 <div className="cart-product">
                   <ProductThumb src={line.imageDataUrl} alt={line.name} size="sm" />
                   <div>

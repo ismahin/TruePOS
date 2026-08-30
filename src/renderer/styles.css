@@ -356,7 +356,9 @@ mark.search-highlight {
 .cart-panel {
   container-type: inline-size;
   container-name: cart;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .checkout-panel .product-results {
@@ -385,14 +387,11 @@ mark.search-highlight {
 }
 
 .cart-panel .cart-lines {
-  flex: 1 1 auto;
-  min-height: 0;
-  max-height: min(360px, 38vh);
-  overflow-x: hidden;
-  overflow-y: auto;
-  overscroll-behavior: contain;
+  flex: 0 0 auto;
+  min-height: min(132px, 22vh);
+  max-height: none;
+  overflow: visible;
   margin-bottom: 4px;
-  padding-right: 2px;
 }
 
 .cart-panel .cart-lines.is-empty {
@@ -2942,13 +2941,16 @@ th {
   }
 
   .two-column,
-  .billing-grid,
   .settings-grid,
   .product-management-grid,
   .inventory-grid,
   .report-grid,
   .settings-layout {
     grid-template-columns: 1fr;
+  }
+
+  .billing-grid {
+    grid-template-columns: minmax(280px, 0.78fr) minmax(380px, 1.22fr);
   }
 
   .settings-preview-stack {
@@ -3005,5 +3007,68 @@ th {
   .driver-setup-notice {
     align-items: flex-start;
     flex-direction: column;
+  }
+}
+
+@media (max-width: 1000px) {
+  .app-shell {
+    grid-template-columns: 76px minmax(0, 1fr);
+  }
+
+  .sidebar {
+    padding: 14px 8px;
+    gap: 16px;
+  }
+
+  .brand {
+    min-height: 52px;
+    padding: 0;
+  }
+
+  .brand-logo {
+    height: 50px;
+  }
+
+  .brand > span,
+  .nav-button-label,
+  .user-card > span,
+  .user-card > small {
+    display: none;
+  }
+
+  .nav-button {
+    position: relative;
+    justify-content: center;
+    padding: 11px 8px;
+  }
+
+  .nav-update-notice,
+  .nav-stock-notice {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    margin: 0;
+  }
+
+  .user-card {
+    padding: 7px;
+  }
+
+  .user-card .icon-text {
+    justify-content: center;
+    padding: 9px 6px;
+    font-size: 0;
+  }
+
+  .workspace {
+    padding: 14px;
+  }
+
+  .billing-grid {
+    grid-template-columns: minmax(240px, 0.72fr) minmax(340px, 1.28fr);
+  }
+
+  .panel {
+    padding: 16px;
   }
 }

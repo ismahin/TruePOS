@@ -1,13 +1,15 @@
-# TruePOS v0.1.34
+# TruePOS v0.1.35
 
-## Login recovery
+## Current Sale visibility and responsive checkout
 
-- Added **Forgot passwords? Reset all logins** to the login page.
-- Admin and cashier credentials can now be reset without knowing the old password.
-- Two explicit confirmations protect against accidental account removal.
-- After recovery, TruePOS opens credential setup so a new admin and optional cashier can be created.
-- Products, inventory, sales, reports, receipt settings, printer settings, and backups remain unchanged.
+- Fixed scanned products disappearing from the **Current Sale** panel on shorter displays.
+- The latest scanned or added product now scrolls into view automatically.
+- The cart, totals, payment controls, and actions remain accessible through panel scrolling.
+- Checkout keeps its two-column layout on compact desktop and laptop screens instead of pushing the sale panel below the visible area.
+- Added a compact sidebar layout for narrower windows while preserving navigation icons and notifications.
+- TruePOS now supports window sizes down to 900 x 600.
 
-## Security notice
+## Verification
 
-- This is a local physical-access recovery option. Anyone who can use the Windows computer can start login recovery.
+- All 42 automated tests pass.
+- Production renderer and Windows installer builds completed successfully.

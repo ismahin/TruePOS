@@ -517,7 +517,7 @@ function NavButton(props: {
   return (
     <button className={`nav-button ${props.active ? "active" : ""}`} aria-label={`${props.label}${ariaExtra}`} onClick={props.onClick}>
       <span className="nav-button-icon">{props.icon}</span>
-      <span>{props.label}</span>
+      <span className="nav-button-label">{props.label}</span>
       {props.notice && <span className="nav-update-notice" title="A TruePOS update is available"><Bell size={13} /></span>}
       {!props.notice && stockAlert > 0 && (
         <span className="nav-stock-notice" title={`${stockAlert} product${stockAlert === 1 ? "" : "s"} need reorder attention`}>

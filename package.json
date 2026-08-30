@@ -1,6 +1,6 @@
 {
   "name": "truepos",
-  "version": "0.1.34",
+  "version": "0.1.35",
   "description": "TruePOS offline desktop point of sale",
   "main": "dist-electron/electron/main.js",
   "author": "TruePOS",
